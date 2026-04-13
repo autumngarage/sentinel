@@ -1,0 +1,10 @@
+# toolkit project profile. Commit this file so all clones use the same commands.
+project_type=node
+package_manager=pnpm
+monorepo=false
+targets=
+lint_command=pnpm lint
+typecheck_command=pnpm typecheck
+build_command=pnpm build
+test_command=pnpm test
+validate_command=pnpm validate

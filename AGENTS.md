@@ -1,0 +1,76 @@
+# AGENTS.md — AI Reviewer Guide for Sentinel
+
+You are reviewing pull requests for **Sentinel**, an autonomous meta-agent that manages software projects across multiple LLM providers. Optimize your review for catching the things that bite this repo, not generic style polish.
+
+This file is the source of truth for how AI reviewers (Codex, Claude, etc.) should think about a PR. The companion file `CLAUDE.md` is for the *author* writing the code; this file is for the *reviewer*.
+
+---
+
+## What to prioritize (in order)
+
+1. **Provider abstraction integrity.** Any change that breaks the Provider interface or makes one provider behave differently than others in ways the router doesn't account for. The abstraction must hold — user config says "use gemini for researcher" and it works identically to "use claude for researcher."
+2. **Config schema safety.** Changes to Zod schemas that could break existing `.sentinel/config.toml` files. Backward compatibility matters — users have configured projects.
+3. **Role boundary violations.** Code in one role that reaches into another role's concerns. The monitor should not plan. The planner should not write code. The coder should not review its own output.
+4. **Cost control.** Any code path that could make unbounded API calls or fail to respect budget limits. A runaway loop against Claude Opus is expensive.
+5. **Secret handling.** API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY) must never be logged, committed, or sent to a provider other than their owner.
+6. **Silent failures in the loop.** The five-step cycle must be observable. If a step fails, the failure must be visible — not swallowed so the next step runs on garbage input.
+
+Style nits, formatting, and theoretical refactors are **out of scope** unless they hide a bug. Do not flag them.
+
+---
+
+## Specific review rules
+
+### High-scrutiny paths
+
+Files: `src/providers/`, `src/loop/`, `src/config/schema.ts`
+
+Flag any of the following:
+- Provider implementations that don't match the interface contract
+- Router logic that could send a request to a provider that doesn't support the required capability
+- Config schema changes without migration logic for existing configs
+- Loop steps that proceed without checking the previous step's output
+- Any hardcoded model IDs outside of the defaults in `config/schema.ts`
+
+### Silent failures
+
+Flag any of the following:
+
+- New `catch` blocks that swallow errors without logging.
+- API calls without timeout or budget checks.
+- Provider health checks that return `true` without actually verifying connectivity.
+- Research results used without checking if the research actually succeeded.
+- Default values returned on error without a log line.
+
+The rule: every exception is either re-raised or logged with enough context to debug from production logs alone.
+
+### Tests
+
+- Bug fixes must include a test that reproduces the original failure mode.
+- Provider implementations should have integration tests (mocked API responses).
+- The loop should have tests for partial failure scenarios (what if the researcher fails but everything else works?).
+- Config schema changes need tests for backward compatibility.
+
+---
+
+## What NOT to flag
+
+- Formatting, whitespace, import order — pre-commit hooks handle these.
+- Type annotations on existing untyped code.
+- "You could refactor this for clarity" — only if the unclarity hides a bug.
+- Missing docstrings on small private functions.
+- Speculative future-proofing — don't suggest abstractions for hypothetical future requirements.
+- Naming preferences absent a clear convention violation.
+
+If you find yourself writing "consider" or "you might want to" without a concrete bug or risk attached, delete the comment.
+
+---
+
+## Output format
+
+1. **Summary** — one paragraph: what this PR does and your overall verdict (approve / request changes / comment).
+2. **Blocking issues** — bugs or risks that must be fixed before merge. Each item: file:line, what's wrong, why it matters, suggested fix.
+3. **Non-blocking observations** — things worth noting but not blocking. Keep this section short.
+4. **Tests** — does this PR add tests for the changed behavior? If not, is that OK?
+
+If there are zero blocking issues, the review is just: "LGTM."
