@@ -99,10 +99,10 @@ def gather_state(project_path: Path) -> ProjectState:
         state.errors.append(f"git log failed: {e}")
         logger.warning("git log failed: %s", e)
 
-    # File tree (top 3 levels, excluding noise)
+    # File tree (top 2 levels, excluding noise — keep it compact)
     try:
         result = _run(
-            ["find", ".", "-maxdepth", "3", "-type", "f",
+            ["find", ".", "-maxdepth", "2", "-type", "f",
              "-not", "-path", "./.git/*",
              "-not", "-path", "./.venv/*",
              "-not", "-path", "./node_modules/*",
