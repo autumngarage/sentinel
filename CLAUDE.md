@@ -42,17 +42,20 @@ bash setup.sh --deps-only
 bash scripts/toolkit-run.sh validate
 
 # Run tests directly
-pnpm test
+uv run pytest
 
-# Type check
-pnpm typecheck
+# Lint
+uv run ruff check src/ tests/
+
+# Auto-fix lint issues
+uv run ruff check --fix src/ tests/
 ```
 
 Fix failing tests before pushing.
 
 ## Release & Distribution
 
-Not yet established. Planned: npm package (`sentinel`) + Homebrew formula (following the toolkit pattern). The release process will mirror toolkit's: version bump, tag, push, GitHub release, formula update.
+Not yet established. Planned: PyPI package (`sentinel`) + Homebrew formula (following the toolkit pattern). The release process will mirror toolkit's: version bump, tag, push, GitHub release, formula update.
 
 ## Architecture
 
@@ -83,22 +86,22 @@ Each role is assigned a configurable LLM provider during `sentinel init`:
 ### Package Structure
 
 ```
-src/
-├── cli/          CLI entrypoint (commander)
-├── config/       Zod schemas for .sentinel/config.toml
+src/sentinel/
+├── cli/          CLI entrypoint (click)
+├── config/       Pydantic schemas for .sentinel/config.toml
 ├── providers/    Unified LLM provider abstraction
-│   ├── interface.ts   Common types (Provider, ChatResponse, etc.)
-│   ├── claude.ts      Anthropic SDK + Agent SDK
-│   ├── openai.ts      OpenAI Responses API + Codex SDK
-│   ├── gemini.ts      Google GenAI SDK
-│   ├── local.ts       Ollama via OpenAI-compatible API
-│   └── router.ts      Role → provider routing
+│   ├── interface.py   Common types (Provider, ChatResponse, etc.)
+│   ├── claude.py      Anthropic SDK + Agent SDK
+│   ├── openai.py      OpenAI Responses API + Codex SDK
+│   ├── gemini.py      Google GenAI SDK
+│   ├── local.py       Ollama via OpenAI-compatible API
+│   └── router.py      Role → provider routing
 ├── roles/        The five agent roles
-│   ├── monitor.ts     State assessment
-│   ├── researcher.ts  Deep research + multi-model consensus
-│   ├── planner.ts     Task decomposition + prioritization
-│   ├── coder.ts       Code execution
-│   └── reviewer.ts    Independent code review
+│   ├── monitor.py     State assessment
+│   ├── researcher.py  Deep research + multi-model consensus
+│   ├── planner.py     Task decomposition + prioritization
+│   ├── coder.py       Code execution
+│   └── reviewer.py    Independent code review
 ├── loop/         The core cycle orchestrator
 ├── research/     Extended research engine
 └── memory/       Persistent project knowledge
@@ -116,12 +119,12 @@ For important research questions, Sentinel can query multiple providers independ
 
 | File | Purpose |
 |------|---------|
-| `src/providers/interface.ts` | The core Provider type that all LLM integrations implement |
-| `src/providers/router.ts` | Maps roles to providers based on project config |
-| `src/config/schema.ts` | Zod schemas defining .sentinel/config.toml shape |
-| `src/loop/index.ts` | The five-step cycle orchestrator |
-| `src/roles/*.ts` | Individual role implementations |
-| `src/cli/index.ts` | CLI entrypoint and command definitions |
+| `src/sentinel/providers/interface.py` | The core Provider type that all LLM integrations implement |
+| `src/sentinel/providers/router.py` | Maps roles to providers based on project config |
+| `src/sentinel/config/schema.py` | Pydantic schemas defining .sentinel/config.toml shape |
+| `src/sentinel/loop/cycle.py` | The five-step cycle orchestrator |
+| `src/sentinel/roles/*.py` | Individual role implementations |
+| `src/sentinel/cli/main.py` | CLI entrypoint and command definitions |
 
 ## State & Config
 

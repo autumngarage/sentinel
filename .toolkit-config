@@ -1,10 +1,10 @@
 # toolkit project profile. Commit this file so all clones use the same commands.
-project_type=node
-package_manager=pnpm
+project_type=python
+package_manager=uv
 monorepo=false
 targets=
-lint_command=pnpm lint
-typecheck_command=pnpm typecheck
-build_command=pnpm build
-test_command=pnpm test
-validate_command=pnpm validate
+lint_command=uv run ruff check src/ tests/
+typecheck_command=
+build_command=uv build
+test_command=uv run pytest
+validate_command=uv run ruff check src/ tests/ && uv run pytest

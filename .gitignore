@@ -26,6 +26,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.python-version
 
 # Build output
 dist/
@@ -33,6 +34,9 @@ build/
 *.egg-info/
 .next/
 out/
+
+# uv
+uv.lock
 
 # Toolkit
 .toolkit-version

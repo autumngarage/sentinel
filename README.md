@@ -126,8 +126,9 @@ Sentinel's research loop draws from [Karpathy's autoresearch](https://github.com
 ## Setup
 
 ```bash
-# Install (npm)
-npm install -g sentinel
+# Install (pip/uv)
+uv tool install sentinel
+# or: pip install sentinel
 
 # Initialize in a project
 cd your-project
