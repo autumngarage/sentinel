@@ -287,6 +287,12 @@ Lens rules:
 ### Git state
 Branch: {branch} | Uncommitted: {uncommitted_files}
 
+### Available tools on this machine
+These CLIs are installed and on PATH — the Coder role can invoke them
+during execution. Factor this into which lenses you generate (e.g.
+generate a deploy-ops lens if deploy CLIs are present):
+{installed_tools}
+
 ### Test results
 {test_output}
 
@@ -386,6 +392,27 @@ Event types:
   - 'lens_failed': {'lens_name': str, 'error': str}
   - 'step_done': {'step': str, 'cost_usd': float}
 """
+
+
+def _build_explore_prompt(state: ProjectState) -> str:
+    """Render EXPLORE_PROMPT from a ProjectState.
+
+    Single source of truth — both the fresh-scan and locked-lens paths
+    call this so no caller can drift out of sync when the template gains
+    a new field.
+    """
+    return EXPLORE_PROMPT.format(
+        goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
+        claude_md=state.claude_md[:3000],
+        readme=state.readme[:2000],
+        recent_commits=state.recent_commits,
+        file_tree=state.file_tree[:2000],
+        branch=state.branch,
+        uncommitted_files=state.uncommitted_files,
+        installed_tools=state.installed_tools or "(not probed)",
+        test_output=state.test_output[:1000],
+        lint_output=state.lint_output[:500],
+    )
 
 
 def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
@@ -533,17 +560,7 @@ class Monitor:
                 ),
             })
             # Still need the project summary — prompt just for that
-            summary_prompt = EXPLORE_PROMPT.format(
-                goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
-                claude_md=state.claude_md[:3000],
-                readme=state.readme[:2000],
-                recent_commits=state.recent_commits,
-                file_tree=state.file_tree[:2000],
-                branch=state.branch,
-                uncommitted_files=state.uncommitted_files,
-                test_output=state.test_output[:1000],
-                lint_output=state.lint_output[:500],
-            )
+            summary_prompt = _build_explore_prompt(state)
             # Simple summary request when lenses are already locked
             summary_response = await provider.chat(
                 summary_prompt
@@ -566,17 +583,7 @@ class Monitor:
                 "message": "Exploring project and generating custom lenses...",
             })
 
-            explore_prompt = EXPLORE_PROMPT.format(
-                goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
-                claude_md=state.claude_md[:3000],
-                readme=state.readme[:2000],
-                recent_commits=state.recent_commits,
-                file_tree=state.file_tree[:2000],
-                branch=state.branch,
-                uncommitted_files=state.uncommitted_files,
-                test_output=state.test_output[:1000],
-                lint_output=state.lint_output[:500],
-            )
+            explore_prompt = _build_explore_prompt(state)
 
             parsed, response = await provider.chat_json(explore_prompt, EXPLORE_SCHEMA)
 

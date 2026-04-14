@@ -45,6 +45,9 @@ class ProjectState:
     lint_output: str = ""
     lint_clean: bool | None = None  # None = no lint command
 
+    # Ops tooling discovered on PATH (rendered for the lens-gen prompt)
+    installed_tools: str = ""
+
     # Errors encountered during gathering
     errors: list[str] = field(default_factory=list)
 
@@ -111,8 +114,15 @@ def detect_project_type(project_path: Path) -> dict:
         result["lint_command"] = "golangci-lint run"
         result["conditional_lenses"].append("performance")
 
-    # Python (uv)
-    elif (project_path / "pyproject.toml").exists():
+    # Python (uv, pip-tools, setuptools, pipenv) — any of these markers
+    # flags the project as Python for scans/work commands
+    elif any(
+        (project_path / marker).exists()
+        for marker in (
+            "pyproject.toml", "requirements.txt", "setup.py",
+            "setup.cfg", "Pipfile",
+        )
+    ):
         result["type"] = "python"
         if (project_path / "uv.lock").exists():
             result["test_command"] = "uv run pytest"
@@ -303,6 +313,10 @@ def gather_state(project_path: Path) -> ProjectState:
             logger.warning("lint command not found: %s", e)
     else:
         state.lint_output = "(no lint command configured)"
+
+    # Ops CLIs available for the Coder to invoke during execution
+    from sentinel.tools import discover_installed_tools, format_tools_for_prompt
+    state.installed_tools = format_tools_for_prompt(discover_installed_tools())
 
     if state.errors:
         logger.info("State gathering completed with %d errors", len(state.errors))

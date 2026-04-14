@@ -60,19 +60,30 @@ def _copy_tree(src: Path, dst: Path) -> list[str]:
 
 
 def _detect_project_type(project: Path) -> str:
-    if (project / "Package.swift").exists() or list(project.glob("*.xcodeproj")):
-        return "swift"
-    if (project / "Cargo.toml").exists():
-        return "rust"
-    if (project / "go.mod").exists():
-        return "go"
-    if (project / "pyproject.toml").exists():
-        return "python"
-    if (project / "package.json").exists():
-        tsconfig = (project / "tsconfig.json").exists()
-        return "typescript" if tsconfig else "javascript"
+    """Return a short project-type label for config.toml.
+
+    Delegates the Swift/Rust/Go/Python/Node/generic decision to the
+    single source of truth in sentinel.state.detect_project_type() so
+    init and gather_state() can't drift apart. Only falls through to
+    init-only labels (typescript, haskell) when the state detector
+    returns "generic" — otherwise a Rust or Swift project that happens
+    to ship a docs site with package.json would get mis-labelled.
+    """
+    from sentinel.state import detect_project_type as _state_detect
+
+    detected = _state_detect(project)["type"]
+
+    if detected != "generic":
+        # Node/TS distinction: state calls both "node"; init prefers
+        # "typescript" when a tsconfig is present
+        if detected == "node":
+            return "typescript" if (project / "tsconfig.json").exists() else "javascript"
+        return detected
+
+    # Haskell — state-level test/lint commands aren't wired yet
     if list(project.glob("*.cabal")) or (project / "stack.yaml").exists():
         return "haskell"
+
     return "generic"
 
 
