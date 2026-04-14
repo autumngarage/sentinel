@@ -65,6 +65,54 @@ class TestProviderNames:
         assert LocalProvider.name == ProviderName.LOCAL
 
 
+class TestClaudeCodeCLIFlags:
+    """The Coder path needs --dangerously-skip-permissions or every Edit
+    gets denied in non-interactive -p mode. Without this, sentinel can
+    never actually execute a refinement — exactly what sigint showed."""
+
+    def test_code_invocation_passes_skip_permissions(self) -> None:
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"result":"ok","is_error":false,"usage":{}}',
+            stderr="",
+        )
+        mock_run = AsyncMock(return_value=fake_result)
+        with patch("sentinel.providers.claude.run_cli_async", new=mock_run):
+            asyncio.run(provider.code("hi"))
+
+        passed_args = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in passed_args
+        assert "--max-turns" in passed_args
+
+    def test_max_turns_uses_configured_value(self) -> None:
+        """Router sets provider.max_turns from config.coder.max_turns —
+        the CLI invocation must honor that instance attribute, not a
+        hardcoded 20."""
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        provider.max_turns = 60
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"result":"ok","is_error":false,"usage":{}}',
+            stderr="",
+        )
+        mock_run = AsyncMock(return_value=fake_result)
+        with patch("sentinel.providers.claude.run_cli_async", new=mock_run):
+            asyncio.run(provider.code("hi"))
+
+        passed_args = mock_run.call_args[0][0]
+        turns_idx = passed_args.index("--max-turns")
+        assert passed_args[turns_idx + 1] == "60"
+
+
 class TestClaudeCodeSurfacesStderr:
     """Regression: Claude CLI failures used to collapse to `content='Error: '`
     with empty stderr on the returned ChatResponse — the one thing you need
@@ -117,3 +165,32 @@ class TestClaudeCodeSurfacesStderr:
         # And the content says SOMETHING useful, not just "Error: "
         assert response.content.startswith("Error:")
         assert response.content != "Error: "
+
+    def test_code_records_cost_on_is_error_paths(self) -> None:
+        """Sigint run: Claude burned $2.07 on max-turns-out runs but
+        sentinel reported $0 because is_error paths dropped total_cost_usd.
+        Budget tracking must not silently lose real spend."""
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        payload = (
+            '{"type":"result","is_error":true,"result":"",'
+            '"num_turns":20,"total_cost_usd":2.07,'
+            '"usage":{"input_tokens":100,"output_tokens":50},'
+            '"duration_ms":300000}'
+        )
+        fake_result = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout=payload, stderr="",
+        )
+        with patch(
+            "sentinel.providers.claude.run_cli_async",
+            new=AsyncMock(return_value=fake_result),
+        ):
+            response = asyncio.run(provider.code("hi"))
+
+        assert response.is_error is True
+        assert response.cost_usd == 2.07
+        assert response.input_tokens == 100
+        assert response.output_tokens == 50

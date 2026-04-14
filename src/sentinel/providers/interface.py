@@ -181,6 +181,11 @@ class Provider(ABC):
     # Can be overridden per provider-instance. Default kept high for safety.
     timeout_sec: int = 600
 
+    # Max tool-use turns the Coder-role provider can run before bailing.
+    # Only the agentic code() path reads this today. Set by Router from
+    # config.coder.max_turns when present.
+    max_turns: int = 40
+
     @abstractmethod
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Send a prompt, get a response."""

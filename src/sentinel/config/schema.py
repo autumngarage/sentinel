@@ -87,6 +87,15 @@ class ScanConfig(BaseModel):
     provider_timeout_sec: int = 600
 
 
+class CoderConfig(BaseModel):
+    """Configuration for the Coder role's agentic execution."""
+    # Max tool-use turns Claude Code / Codex can take per work item.
+    # 20 was enough for trivial fixes but chokes on security hardening
+    # or multi-file refactors — Claude uses ~4 turns just reading files
+    # before it edits anything. 40 is a safer default for real work.
+    max_turns: int = 40
+
+
 class RolesConfig(BaseModel):
     monitor: RoleConfig
     researcher: RoleConfig
@@ -106,3 +115,4 @@ class SentinelConfig(BaseModel):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     local: LocalConfig = Field(default_factory=LocalConfig)
     scan: ScanConfig = Field(default_factory=ScanConfig)
+    coder: CoderConfig = Field(default_factory=CoderConfig)
