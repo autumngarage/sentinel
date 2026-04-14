@@ -229,6 +229,9 @@ Don't pad with irrelevant perspectives. Don't skip what matters.
 
 ## Project Context
 
+### Goals (from user)
+{goals_md}
+
 ### CLAUDE.md
 ```
 {claude_md}
@@ -350,6 +353,7 @@ class Monitor:
         })
 
         explore_prompt = EXPLORE_PROMPT.format(
+            goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
             claude_md=state.claude_md[:3000],
             readme=state.readme[:2000],
             recent_commits=state.recent_commits,
