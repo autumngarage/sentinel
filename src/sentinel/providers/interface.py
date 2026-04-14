@@ -80,13 +80,19 @@ def run_cli(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[
 
 
 async def run_cli_async(
-    args: list[str], timeout: int = 300, env: dict | None = None,
+    args: list[str],
+    timeout: int = 300,
+    env: dict | None = None,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a CLI command asynchronously.
 
     env: optional environment dict. If None, inherits parent env (most CLIs
     need this for auth tokens in macOS keychain/config dirs). Providers
     should pass a minimal env to reduce secret leakage into prompts.
+    cwd: optional working directory. If None, inherits the caller's cwd.
+    The Coder path MUST pass the target project path here so Claude Code
+    edits land in the target, not in the sentinel process cwd.
     """
     import asyncio as _asyncio
 
@@ -95,6 +101,7 @@ async def run_cli_async(
         stdout=_asyncio.subprocess.PIPE,
         stderr=_asyncio.subprocess.PIPE,
         env=env,  # None means inherit
+        cwd=cwd,  # None means inherit
     )
 
     try:
@@ -180,6 +187,11 @@ class Provider(ABC):
     # Per-call timeout (seconds). Set by Router from config.scan.provider_timeout_sec.
     # Can be overridden per provider-instance. Default kept high for safety.
     timeout_sec: int = 600
+
+    # Max tool-use turns the Coder-role provider can run before bailing.
+    # Only the agentic code() path reads this today. Set by Router from
+    # config.coder.max_turns when present.
+    max_turns: int = 40
 
     @abstractmethod
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
