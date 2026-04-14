@@ -204,17 +204,38 @@ class TestPresets:
         providers = {r["provider"] for r in config["roles"].values()}
         assert "local" not in providers
 
-    def test_preset_local_uses_ollama_when_available(
-        self, fake_cli_env, isolated_home,
-    ):
-        fake_cli_env(claude=True, gemini=True, ollama=True)
-        CliRunner().invoke(main, ["init", "--preset", "local"])
-        config = _read_config(isolated_home)
-        # Every role should be local
-        for role in ("monitor", "researcher", "planner", "coder", "reviewer"):
-            assert config["roles"][role]["provider"] == "local", (
-                f"local preset should put {role} on ollama"
-            )
+    def test_preset_cheap_never_writes_unavailable_provider(self):
+        """Regression: cheap preset used to hard-code gemini as the coder
+        fallback even when gemini wasn't installed."""
+        from sentinel.config.schema import ProviderName
+        from sentinel.recommendations import apply_preset
+
+        # Ollama-only install — every role must land on an installed provider
+        assignments = apply_preset(
+            "cheap",
+            available={ProviderName.LOCAL},
+            ollama_models=["qwen2.5-coder:14b"],
+        )
+        providers = {prov for prov, _ in assignments.values()}
+        assert providers <= {ProviderName.LOCAL}, (
+            f"cheap preset wrote unavailable providers: {providers}"
+        )
+
+    def test_preset_local_assigns_every_role_to_ollama(self):
+        """Direct unit test — `local` preset hits the ollama HTTP API at
+        runtime, so we test the pure function here rather than round-tripping
+        through the CLI (which would need a live server)."""
+        from sentinel.config.schema import ProviderName
+        from sentinel.recommendations import apply_preset
+
+        available = {
+            ProviderName.CLAUDE, ProviderName.GEMINI, ProviderName.LOCAL,
+        }
+        assignments = apply_preset(
+            "local", available, ollama_models=["qwen2.5-coder:14b"],
+        )
+        providers = {prov for prov, _ in assignments.values()}
+        assert providers == {ProviderName.LOCAL}
 
     def test_unknown_preset_fails_cleanly(self, fake_cli_env, isolated_home):
         fake_cli_env(claude=True)

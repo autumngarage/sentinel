@@ -214,27 +214,33 @@ def apply_preset(
         return {role: (target, model) for role in RoleName}
 
     if preset == "cheap":
-        # Prefer local > gemini-flash for most roles; claude only for coder
-        result: dict[RoleName, tuple[ProviderName, str]] = {}
+        # Prefer local > gemini-flash for most roles; claude only for coder.
+        # Always fall through to recommend_for_role() so an unavailable
+        # provider is never written into config.
+        cheap_result: dict[RoleName, tuple[ProviderName, str]] = {}
         for role in RoleName:
             if role == RoleName.CODER:
-                # Coder needs agentic — claude or openai
                 if ProviderName.CLAUDE in available:
-                    result[role] = (ProviderName.CLAUDE, "claude-sonnet-4-6")
+                    cheap_result[role] = (
+                        ProviderName.CLAUDE, "claude-sonnet-4-6",
+                    )
                 elif ProviderName.OPENAI in available:
-                    result[role] = (ProviderName.OPENAI, "gpt-5.4-mini")
+                    cheap_result[role] = (ProviderName.OPENAI, "gpt-5.4-mini")
                 else:
-                    result[role] = (ProviderName.GEMINI, "gemini-2.5-flash")
+                    rec = recommend_for_role(role, available, ollama_models)
+                    cheap_result[role] = (rec.provider, rec.model)
             elif ProviderName.LOCAL in available:
-                result[role] = (
+                cheap_result[role] = (
                     ProviderName.LOCAL, _pick_local_model(ollama_models),
                 )
             elif ProviderName.GEMINI in available:
-                result[role] = (ProviderName.GEMINI, "gemini-2.5-flash")
+                cheap_result[role] = (
+                    ProviderName.GEMINI, "gemini-2.5-flash",
+                )
             else:
                 rec = recommend_for_role(role, available, ollama_models)
-                result[role] = (rec.provider, rec.model)
-        return result
+                cheap_result[role] = (rec.provider, rec.model)
+        return cheap_result
 
     if preset == "local":
         # Use ollama everywhere (if installed)
