@@ -15,6 +15,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path  # noqa: TC003 — runtime use in _load/_save_locked_lenses
 from typing import TYPE_CHECKING
 
 from sentinel.state import ProjectState  # noqa: TC001 — used at runtime in dataclasses
@@ -387,6 +388,116 @@ Event types:
 """
 
 
+def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
+    """Read .sentinel/lenses.md if it exists — user-approved lens set.
+
+    Locked lenses enable trend tracking (same lens scored across scans)
+    and avoid re-generating the same lenses every run.
+    """
+    import re
+
+    lenses_file = project_path / ".sentinel" / "lenses.md"
+    if not lenses_file.exists():
+        return None
+
+    content = lenses_file.read_text()
+    lenses: list[Lens] = []
+
+    # Parse markdown — each lens is an H2 section with description,
+    # "### What to look for", and "### Questions" subsections.
+    sections = re.split(r"^## ", content, flags=re.MULTILINE)[1:]  # skip preamble
+    for section in sections:
+        lines = section.strip().splitlines()
+        if not lines:
+            continue
+        name = lines[0].strip()
+        # Skip non-lens H2 sections (e.g. "How to edit")
+        if not re.match(r"^[a-z][a-z0-9-]*$", name):
+            continue
+
+        description = ""
+        what_to_look_for = ""
+        questions: list[str] = []
+
+        mode = "description"
+        for line in lines[1:]:
+            s = line.strip()
+            if s.startswith("### What to look for"):
+                mode = "look"
+                continue
+            if s.startswith("### Questions"):
+                mode = "q"
+                continue
+            if s.startswith("###"):
+                mode = "other"
+                continue
+            if mode == "description" and s:
+                description += (" " if description else "") + s
+            elif mode == "look" and s:
+                what_to_look_for += (" " if what_to_look_for else "") + s
+            elif mode == "q" and s.startswith("- "):
+                questions.append(s[2:].strip())
+
+        if name and description:
+            lenses.append(Lens(
+                name=name,
+                description=description,
+                what_to_look_for=what_to_look_for or description,
+                questions=questions,
+            ))
+
+    return lenses if lenses else None
+
+
+def _save_locked_lenses(
+    project_path: Path, lenses: list[Lens],
+) -> Path:
+    """Persist lenses to .sentinel/lenses.md for reuse on future scans."""
+    from datetime import datetime
+
+    lenses_dir = project_path / ".sentinel"
+    lenses_dir.mkdir(exist_ok=True)
+    path = lenses_dir / "lenses.md"
+
+    # Don't overwrite existing — respects user edits
+    if path.exists():
+        return path
+
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    lines = [
+        "# Sentinel Lenses",
+        "",
+        f"*Generated {timestamp}. Edit freely — sentinel reuses these on every scan.*",
+        "",
+        "Delete this file to regenerate from scratch on the next scan.",
+        "Add/remove/rename lenses as you like — sentinel will use what you write here.",
+        "",
+        "---",
+        "",
+    ]
+
+    for lens in lenses:
+        lines.append(f"## {lens.name}")
+        lines.append("")
+        lines.append(lens.description)
+        lines.append("")
+        lines.append("### What to look for")
+        lines.append("")
+        lines.append(lens.what_to_look_for)
+        lines.append("")
+        if lens.questions:
+            lines.append("### Questions")
+            lines.append("")
+            for q in lens.questions:
+                lines.append(f"- {q}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    path.write_text("\n".join(lines))
+    return path
+
+
 class Monitor:
     def __init__(self, router: Router) -> None:
         self.router = router
@@ -404,51 +515,100 @@ class Monitor:
                 on_progress(event, data)
 
         # --- Step 1: EXPLORE + GENERATE LENSES ---
-        emit("step_start", {
-            "step": "explore",
-            "message": "Exploring project and generating custom lenses...",
-        })
+        provider = self.router.get_provider("monitor")
 
-        explore_prompt = EXPLORE_PROMPT.format(
-            goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
-            claude_md=state.claude_md[:3000],
-            readme=state.readme[:2000],
-            recent_commits=state.recent_commits,
-            file_tree=state.file_tree[:2000],
-            branch=state.branch,
-            uncommitted_files=state.uncommitted_files,
-            test_output=state.test_output[:1000],
-            lint_output=state.lint_output[:500],
+        # Check for locked lenses first (reuse across scans for trend tracking)
+        project_path_obj = Path(state.path) if state.path else None
+        locked = (
+            _load_locked_lenses(project_path_obj)
+            if project_path_obj else None
         )
 
-        provider = self.router.get_provider("monitor")
-        parsed, response = await provider.chat_json(explore_prompt, EXPLORE_SCHEMA)
-
-        result.model = response.model
-        result.provider = response.provider
-        result.total_input_tokens += response.input_tokens
-        result.total_output_tokens += response.output_tokens
-        result.total_cost_usd += response.cost_usd
-
-        if not parsed or "lenses" not in parsed:
-            result.error = (
-                f"Lens generation failed. Provider returned non-schema response. "
-                f"First 200 chars: {response.content[:200]}"
+        if locked:
+            emit("step_start", {
+                "step": "explore",
+                "message": (
+                    f"Using {len(locked)} locked lenses from "
+                    f".sentinel/lenses.md..."
+                ),
+            })
+            # Still need the project summary — prompt just for that
+            summary_prompt = EXPLORE_PROMPT.format(
+                goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
+                claude_md=state.claude_md[:3000],
+                readme=state.readme[:2000],
+                recent_commits=state.recent_commits,
+                file_tree=state.file_tree[:2000],
+                branch=state.branch,
+                uncommitted_files=state.uncommitted_files,
+                test_output=state.test_output[:1000],
+                lint_output=state.lint_output[:500],
             )
-            logger.error(result.error)
-            return result
+            # Simple summary request when lenses are already locked
+            summary_response = await provider.chat(
+                summary_prompt
+                + "\n\nJust give me the project_summary paragraph — "
+                "2-3 paragraphs of what this project is, what matters, what makes it unique. "
+                "No JSON, no lens list.",
+            )
+            result.model = summary_response.model
+            result.provider = summary_response.provider
+            result.total_input_tokens += summary_response.input_tokens
+            result.total_output_tokens += summary_response.output_tokens
+            result.total_cost_usd += summary_response.cost_usd
+            result.project_summary = summary_response.content
+            result.lenses = locked
+            emit("lens_generated", {"lenses": result.lenses})
+            emit("step_done", {"step": "explore", "cost_usd": summary_response.cost_usd})
+        else:
+            emit("step_start", {
+                "step": "explore",
+                "message": "Exploring project and generating custom lenses...",
+            })
 
-        result.project_summary = parsed.get("project_summary", "")
-        for lens_data in parsed["lenses"]:
-            result.lenses.append(Lens(
-                name=lens_data["name"],
-                description=lens_data["description"],
-                what_to_look_for=lens_data["what_to_look_for"],
-                questions=lens_data.get("questions", []),
-            ))
+            explore_prompt = EXPLORE_PROMPT.format(
+                goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
+                claude_md=state.claude_md[:3000],
+                readme=state.readme[:2000],
+                recent_commits=state.recent_commits,
+                file_tree=state.file_tree[:2000],
+                branch=state.branch,
+                uncommitted_files=state.uncommitted_files,
+                test_output=state.test_output[:1000],
+                lint_output=state.lint_output[:500],
+            )
 
-        emit("lens_generated", {"lenses": result.lenses})
-        emit("step_done", {"step": "explore", "cost_usd": response.cost_usd})
+            parsed, response = await provider.chat_json(explore_prompt, EXPLORE_SCHEMA)
+
+            result.model = response.model
+            result.provider = response.provider
+            result.total_input_tokens += response.input_tokens
+            result.total_output_tokens += response.output_tokens
+            result.total_cost_usd += response.cost_usd
+
+            if not parsed or "lenses" not in parsed:
+                result.error = (
+                    f"Lens generation failed. Provider returned non-schema response. "
+                    f"First 200 chars: {response.content[:200]}"
+                )
+                logger.error(result.error)
+                return result
+
+            result.project_summary = parsed.get("project_summary", "")
+            for lens_data in parsed["lenses"]:
+                result.lenses.append(Lens(
+                    name=lens_data["name"],
+                    description=lens_data["description"],
+                    what_to_look_for=lens_data["what_to_look_for"],
+                    questions=lens_data.get("questions", []),
+                ))
+
+            # Save the generated lenses so future scans reuse them
+            if project_path_obj:
+                _save_locked_lenses(project_path_obj, result.lenses)
+
+            emit("lens_generated", {"lenses": result.lenses})
+            emit("step_done", {"step": "explore", "cost_usd": response.cost_usd})
 
         # --- Step 2: EVALUATE (parallel) ---
         emit("step_start", {
