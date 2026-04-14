@@ -21,8 +21,12 @@ extend TIER_KEYWORDS rather than delegating to an LLM.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
-from pathlib import Path  # noqa: TC003 — used at runtime for rglob/read_text
+from pathlib import Path  # noqa: TC003 — used at runtime for os.walk/read_text
+
+logger = logging.getLogger(__name__)
 
 # File extensions that carry documentation. Kept narrow — we don't want
 # to sweep source code or data files. `.org` for Emacs users, `.adoc`
@@ -81,6 +85,21 @@ DENY_FILENAMES: frozenset[str] = frozenset({
     "security", "security.md",  # mostly vulnerability-disclosure boilerplate
 })
 
+# Substring patterns in filenames that strongly signal secrets or
+# auth-adjacent content. We refuse to read these into the LLM prompt
+# even if they match a tier keyword — the risk of forwarding a
+# `credentials.txt` or `api_keys.md` to an external provider is too
+# high vs. the signal they'd provide. Case-insensitive substring match
+# on the filename stem.
+SECRET_PATTERNS: tuple[str, ...] = (
+    "secret", "credential", "cred",
+    "api_key", "apikey", "api-key",
+    "token", "password", "passwd",
+    ".env", "env.local", "env.production",
+    "private_key", "privatekey", "private-key",
+    "auth.txt", "authorization",
+)
+
 
 def _tier_for_filename(name: str) -> int:
     """Return the highest matching tier (0 = no match)."""
@@ -91,32 +110,55 @@ def _tier_for_filename(name: str) -> int:
     return 0
 
 
-def _iter_doc_candidates(project_path: Path) -> list[Path]:
-    """Walk the project for doc-like files, skipping noise dirs.
+def _looks_like_secret(filename: str) -> bool:
+    """True if the filename pattern-matches a secret-adjacent name.
 
-    Limits walk depth to 3 levels so docs inside deeply nested vendored
-    libraries don't sneak in. Project-level docs live at the top 1-2
-    levels; 3 levels covers something like `agent/planning/thesis.md`.
+    Applied BEFORE tier scoring so a file matching a keyword tier still
+    gets rejected when its name is suspicious. The risk of forwarding
+    credentials.txt to an external LLM provider is not worth the
+    potential signal.
+    """
+    lower = filename.lower()
+    return any(pattern in lower for pattern in SECRET_PATTERNS)
+
+
+def _iter_doc_candidates(project_path: Path) -> list[Path]:
+    """Walk the project for doc-like files, pruning noise dirs.
+
+    Uses os.walk so we can prune skipped dirs IN PLACE (modifying
+    `dirs` stops the walk from descending into them). A naive rglob
+    still descends into node_modules/.venv/vendor trees before
+    filtering — a monorepo with tens of thousands of nested doc files
+    would stall state gathering for minutes before we returned. Pruning
+    up-front is O(top-level-dirs) not O(all-files).
+
+    Depth cap is 3 levels: project-level docs live at the top 1-2
+    levels; 3 covers something like `agent/planning/thesis.md`.
     """
     candidates: list[Path] = []
-    root_depth = len(project_path.resolve().parts)
-    for path in project_path.rglob("*"):
-        try:
-            relative_parts = path.relative_to(project_path).parts
-        except ValueError:
-            continue
-        if any(p in SKIP_DIRS for p in relative_parts):
-            continue
-        depth = len(path.resolve().parts) - root_depth
-        if depth > 3:
-            continue
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in DOC_EXTENSIONS:
-            continue
-        if path.name.lower() in DENY_FILENAMES:
-            continue
-        candidates.append(path)
+    project_path_str = str(project_path)
+    for dirpath, dirs, files in os.walk(project_path):
+        # Prune noise dirs BEFORE descending into them (in-place mutation)
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        # Enforce depth cap
+        relative = os.path.relpath(dirpath, project_path_str)
+        depth = 0 if relative == "." else len(relative.split(os.sep))
+        if depth >= 3:
+            dirs[:] = []
+            if depth > 3:
+                continue
+        for name in files:
+            suffix = os.path.splitext(name)[1].lower()
+            if suffix not in DOC_EXTENSIONS:
+                continue
+            lower_name = name.lower()
+            if lower_name in DENY_FILENAMES:
+                continue
+            if _looks_like_secret(lower_name):
+                # Secret-adjacent filename — never read, never forward
+                # to an LLM, not even if it matches a doc keyword tier.
+                continue
+            candidates.append(Path(dirpath) / name)
     return candidates
 
 
@@ -157,10 +199,18 @@ def _summarize_doc(path: Path, max_chars: int = 800) -> str:
     whitespace or inside ``` fences) to keep the prompt dense with
     descriptive prose. Falls back to the first max_chars if stripping
     produces nothing useful.
+
+    On read failure (permission denied, unicode decode beyond replace
+    mode, etc.) logs with path context and returns "" — the caller
+    drops the doc from the list. We don't raise because a single
+    unreadable strategic doc shouldn't abort the whole scan.
     """
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as exc:
+        logger.warning(
+            "Could not read strategic doc %s (skipping): %s", path, exc,
+        )
         return ""
     # Trim long fenced code blocks
     stripped = re.sub(

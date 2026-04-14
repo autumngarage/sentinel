@@ -91,6 +91,70 @@ class TestRanking:
         assert "DEEPLY_NESTED_THESIS.md" not in names
 
 
+class TestSecretFiltering:
+    """Codex review: secret-adjacent filenames at root level (e.g.
+    `secrets.txt`, `credentials.md`, `API_KEY.md`) must never be
+    read or forwarded to an LLM. Defense-in-depth: match patterns
+    BEFORE tier scoring so even doc-keyword-matching names get
+    rejected."""
+
+    def test_secret_filenames_are_skipped(self, tmp_path: Path) -> None:
+        from sentinel.docs import discover_project_docs
+        _make_project(tmp_path, {
+            "SECRETS.md": "OPENAI_API_KEY=sk-real\n",
+            "credentials.txt": "password=hunter2",
+            "api_keys.md": "foo_key=abc",
+            ".env": "SECRET=x",
+            "README.md": "# real",
+        })
+        output = discover_project_docs(tmp_path)
+        assert "OPENAI_API_KEY" not in output
+        assert "hunter2" not in output
+        assert "foo_key" not in output
+        assert "# real" in output
+
+    def test_keyword_match_does_not_override_secret_filter(
+        self, tmp_path: Path,
+    ) -> None:
+        """A secret filename that ALSO matches a doc keyword
+        (e.g. `secrets_api.md`) still gets filtered out."""
+        from sentinel.docs import discover_project_docs
+        _make_project(tmp_path, {
+            "secrets_api.md": "shared api_key=secret123",
+            "README.md": "real",
+        })
+        output = discover_project_docs(tmp_path)
+        assert "secret123" not in output
+
+
+class TestWalkPruning:
+    """Codex review: rglob used to descend into skipped dirs before
+    filtering, so a repo with a giant node_modules would stall state
+    gathering. os.walk + in-place dirs pruning fixes this — the skip
+    dir is never entered."""
+
+    def test_large_node_modules_does_not_slow_walk(
+        self, tmp_path: Path,
+    ) -> None:
+        """This is a perf test by proxy — we create a node_modules
+        subtree and verify no files inside it are even considered."""
+        from sentinel.docs import _iter_doc_candidates
+
+        # Simulate a moderately-sized node_modules
+        for i in range(30):
+            pkg = tmp_path / "node_modules" / f"pkg_{i}"
+            pkg.mkdir(parents=True)
+            (pkg / "README.md").write_text(f"junk {i}")
+        (tmp_path / "ROADMAP.md").write_text("# real")
+
+        candidates = _iter_doc_candidates(tmp_path)
+        parts_lists = [
+            str(p.relative_to(tmp_path)).split("/") for p in candidates
+        ]
+        assert not any("node_modules" in parts for parts in parts_lists)
+        assert any(p.name == "ROADMAP.md" for p in candidates)
+
+
 class TestExcerptFormatting:
     def test_empty_project_returns_empty_string(self, tmp_path: Path) -> None:
         assert discover_project_docs(tmp_path) == ""
