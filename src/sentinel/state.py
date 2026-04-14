@@ -35,6 +35,7 @@ class ProjectState:
     file_tree: str = ""
     claude_md: str = ""
     readme: str = ""
+    goals_md: str = ""  # user-provided goals (.sentinel/goals.md)
 
     # Tests
     test_output: str = ""
@@ -250,6 +251,11 @@ def gather_state(project_path: Path) -> ProjectState:
         state.readme = readme.read_text()[:2000]
     else:
         state.readme = "(no README.md)"
+
+    # goals.md — user-provided project goals (optional but high-signal)
+    goals_md = project_path / ".sentinel" / "goals.md"
+    if goals_md.exists():
+        state.goals_md = goals_md.read_text()[:3000]
 
     # Test results — try toolkit-config first, then auto-detect
     toolkit_config = project_path / ".toolkit-config"
