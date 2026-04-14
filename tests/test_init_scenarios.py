@@ -282,6 +282,40 @@ class TestPresets:
 
 # ---------- Goals.md nudge (not a blocker) ----------
 
+class TestAutoGitignore:
+    """sentinel init appends .sentinel/ and .claude/ to the target's
+    .gitignore so every open-pr.sh / git status doesn't warn about
+    untracked sentinel artifacts."""
+
+    def test_creates_gitignore_when_absent(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore = (isolated_home / ".gitignore").read_text()
+        assert ".sentinel/" in gitignore
+        assert ".claude/" in gitignore
+
+    def test_appends_to_existing_gitignore(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        (isolated_home / ".gitignore").write_text("node_modules/\n")
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore = (isolated_home / ".gitignore").read_text()
+        # Existing entries preserved
+        assert "node_modules/" in gitignore
+        # New sentinel entries added
+        assert ".sentinel/" in gitignore
+
+    def test_idempotent_on_reinit(self, fake_cli_env, isolated_home):
+        """Running init twice must not duplicate the sentinel block."""
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        first = (isolated_home / ".gitignore").read_text()
+        CliRunner().invoke(main, ["init", "--yes"])
+        second = (isolated_home / ".gitignore").read_text()
+        assert first == second, "gitignore must not grow on re-init"
+        # Marker appears exactly once
+        assert second.count("# sentinel artifacts") == 1
+
+
 class TestGoalsNudge:
     """Goals.md template should warn, not block — work still proceeds."""
 

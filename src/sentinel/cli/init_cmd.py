@@ -267,6 +267,7 @@ def run_init(
     _write_config(project, project_type, role_assignments, daily_budget)
     _write_goals_template(project, project_type)
     _install_claude_templates(project)
+    _ensure_gitignore_entries(project)
 
     # Done
     console.print("\n[bold green]Done![/bold green]\n")
@@ -401,3 +402,36 @@ def _install_claude_templates(project: Path) -> None:
         console.print(
             f"  [green]✓[/green] Installed {len(created)} Claude Code files to .claude/"
         )
+
+
+_SENTINEL_GITIGNORE_MARKER = "# sentinel artifacts"
+_SENTINEL_GITIGNORE_BLOCK = """\
+
+# sentinel artifacts — generated per-run, not source
+.sentinel/
+.claude/
+"""
+
+
+def _ensure_gitignore_entries(project: Path) -> None:
+    """Append sentinel artifact paths to the target project's .gitignore.
+
+    Without this, every `git status` / `open-pr.sh` run warns about
+    uncommitted .sentinel/ and .claude/ files — friction that makes
+    users either ignore warnings (bad) or commit the artifacts (worse).
+    Idempotent: checks for our marker comment before appending.
+    """
+    gitignore = project / ".gitignore"
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    if _SENTINEL_GITIGNORE_MARKER in existing:
+        return
+
+    # Preserve the existing file's trailing newline situation; append
+    # with a leading newline so our block doesn't glue onto the last
+    # existing entry.
+    separator = "" if existing.endswith("\n") or not existing else "\n"
+    gitignore.write_text(existing + separator + _SENTINEL_GITIGNORE_BLOCK)
+    action = "Created" if not existing else "Updated"
+    console.print(
+        f"  [green]✓[/green] {action} .gitignore with sentinel/claude entries",
+    )

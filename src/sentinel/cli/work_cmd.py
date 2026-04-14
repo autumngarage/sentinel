@@ -55,6 +55,36 @@ TEMPLATE_MARKERS = [
 ]
 
 
+def _reset_and_checkout(project: str, branch: str) -> None:
+    """Reset the working tree and checkout a branch.
+
+    `git checkout` fails silently on dirty trees, which causes each
+    work item's edits to stack on the previous. After Coder commits
+    its real work to its own feature branch, anything lingering in the
+    tree here is a failed attempt (pre-commit hook rejection, Claude
+    error mid-edit, etc.) and should be discarded before we move on.
+
+    We clean transcripts/config in .sentinel/ from untracked-cleanup
+    scope — those are sentinel's own artifacts, never part of an item.
+    """
+    subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        capture_output=True, cwd=project, timeout=30,
+    )
+    # Remove untracked files from the Coder's attempted work — but
+    # preserve .sentinel/ (transcripts, proposals) and .claude/ (agent
+    # templates installed by init).
+    subprocess.run(
+        ["git", "clean", "-fd",
+         "--exclude=.sentinel/", "--exclude=.claude/"],
+        capture_output=True, cwd=project, timeout=30,
+    )
+    subprocess.run(
+        ["git", "checkout", branch],
+        capture_output=True, cwd=project, timeout=30,
+    )
+
+
 def _parse_interval(interval: str) -> int:
     """Parse interval like '10m', '1h', '30s' to seconds."""
     m = re.match(r"^(\d+)\s*([smh])$", interval.strip())
@@ -355,11 +385,9 @@ async def _run_single_cycle(
         console.print("\n\n[yellow]  Interrupted. Cleaning up...[/yellow]")
 
     finally:
-        # Return to original branch
-        subprocess.run(
-            ["git", "checkout", original_branch],
-            capture_output=True, cwd=project, timeout=30,
-        )
+        # Return to original branch — reset first so a failed final
+        # item doesn't leave the user stranded on a dirty feature branch
+        _reset_and_checkout(str(project), original_branch)
 
     # --- Summary ---
     elapsed = time.time() - start_time
@@ -434,11 +462,13 @@ async def _execute_and_review(
     console.print(f"[bold cyan]→ Executing[/bold cyan] {work_item.title}")
     console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
 
-    # Reset to original branch before each item
-    subprocess.run(
-        ["git", "checkout", original_branch],
-        capture_output=True, cwd=project, timeout=30,
-    )
+    # Reset to original branch before each item. `git checkout` fails
+    # silently when the working tree is dirty, which used to cause each
+    # item's edits to stack on the previous — sigint dogfood showed 3
+    # "successful" runs commingling into one diff. Reset first, then
+    # checkout — the Coder commits its own work, so anything still in
+    # the tree here is a failed attempt we shouldn't carry forward.
+    _reset_and_checkout(str(project), original_branch)
 
     t0 = time.time()
     exec_result = await coder.execute(work_item, str(project))

@@ -198,6 +198,119 @@ class TestFilesChangedIgnoresSentinelArtifacts:
             )
 
 
+class TestCoderCommitsToFeatureBranch:
+    """Before this PR, Coder created a branch, edited files, ran tests,
+    and returned status=success — but never committed. The diff lived
+    in the working tree only, and the next item's checkout silently
+    failed on the dirty tree, commingling edits. Sigint dogfood showed
+    4 branches with 0 commits each. Fix verified by this test."""
+
+    @pytest.mark.asyncio
+    async def test_successful_execution_commits_to_branch(self) -> None:
+        """Claude writes a file, tests pass → Coder commits it. The
+        feature branch now has a real commit pointing at the diff."""
+        import subprocess as _sp
+
+        # Mock provider that pretends Claude wrote a file to the tree
+        # in the caller's cwd. We run the test with cwd=tmpdir so the
+        # effect is scoped.
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                self.code_calls.append(prompt)
+                # Simulate Claude editing a file in the target repo
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("print('fixed')\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="cycle-1", title="fix the thing", description="it was broken",
+            type="fix", priority="high", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            init_sha = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+
+            result = await coder.execute(work_item, tmpdir)
+
+            assert result.status in ("success", "partial")
+            # The fix: an actual commit exists on the feature branch
+            assert result.commit_sha, "Coder must record a commit SHA"
+            assert result.commit_sha != init_sha, (
+                "commit_sha must point at a new commit, not the init commit"
+            )
+            log = _sp.run(
+                ["git", "log", "--oneline", result.branch],
+                capture_output=True, text=True, cwd=tmpdir,
+            )
+            assert "fix the thing" in log.stdout, (
+                f"expected commit on feature branch, got: {log.stdout!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_commits_even_when_tests_fail(self) -> None:
+        """Partial success (coded but tests fail) must still commit —
+        reviewer needs a real diff to give useful changes-requested
+        feedback. A vaporized diff is worse than a failing one."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "partial.py").write_text("broken = 1\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="2", title="attempt fix", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Configure a toolkit test_command that always fails
+            (Path(tmpdir) / ".toolkit-config").write_text(
+                "test_command=false\n",
+            )
+            result = await coder.execute(work_item, tmpdir)
+
+            # Partial = code landed but tests failed
+            assert result.status == "partial"
+            assert result.commit_sha, (
+                "must commit even on test-fail so reviewer has real diff"
+            )
+
+
 class TestCoderPersistsTranscripts:
     """Every execution attempt — success, failure, or exception —
     must leave a debuggable record behind. Before this PR, bare

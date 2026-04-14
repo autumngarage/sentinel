@@ -254,11 +254,11 @@ async def run_cycle(
         console.print(f"\n  [bold]({i}/{max_items}) {work_item.title}[/bold]")
         console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
 
-        # Return to original branch before each item (parallel-able later)
-        subprocess.run(
-            ["git", "checkout", original_branch],
-            capture_output=True, cwd=project, timeout=30,
-        )
+        # Return to original branch before each item. Reset first so
+        # a dirty tree from a failed prior item doesn't silently block
+        # checkout and cause items to stack (sigint dogfood finding).
+        from sentinel.cli.work_cmd import _reset_and_checkout
+        _reset_and_checkout(str(project), original_branch)
 
         t0 = time.time()
         exec_result = await coder.execute(work_item, str(project))
@@ -306,11 +306,9 @@ async def run_cycle(
             for issue in review.blocking_issues[:3]:
                 console.print(f"      • {issue}")
 
-    # Return to original branch
-    subprocess.run(
-        ["git", "checkout", original_branch],
-        capture_output=True, cwd=project, timeout=30,
-    )
+    # Return to original branch with a clean tree — see _reset_and_checkout
+    from sentinel.cli.work_cmd import _reset_and_checkout
+    _reset_and_checkout(str(project), original_branch)
 
     # --- SUMMARY ---
     console.print()
