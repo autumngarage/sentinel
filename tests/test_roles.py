@@ -402,9 +402,10 @@ class TestWorkingTreeGuard:
         (tmp_path / "file.py").write_text("x\nmodified\n")
         assert _working_tree_clean(tmp_path) is False
 
-    def test_ignores_untracked_files(self, tmp_path) -> None:
-        """Untracked files (like .sentinel/transcripts) must not count
-        as dirty — reset --hard doesn't touch them."""
+    def test_rejects_user_untracked_files(self, tmp_path) -> None:
+        """Codex round 3: untracked files outside .sentinel/ and
+        .claude/ must count as dirty, because `git clean -fd` between
+        items would wipe them."""
         import subprocess as _sp
 
         from sentinel.cli.work_cmd import _working_tree_clean
@@ -415,7 +416,28 @@ class TestWorkingTreeGuard:
              "commit", "--allow-empty", "-m", "init", "-q"],
             cwd=tmp_path, check=True,
         )
-        (tmp_path / "untracked.md").write_text("x\n")
+        (tmp_path / "user_wip.md").write_text("user scratch\n")
+        assert _working_tree_clean(tmp_path) is False, (
+            "user's untracked files must block start — clean -fd would wipe them"
+        )
+
+    def test_allows_sentinel_artifacts_as_untracked(self, tmp_path) -> None:
+        """Sentinel's own artifacts (.sentinel/, .claude/) don't count
+        as dirty — clean -fd excludes them, they're sentinel's own."""
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / ".sentinel").mkdir()
+        (tmp_path / ".sentinel" / "config.toml").write_text("x\n")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "agent.md").write_text("x\n")
         assert _working_tree_clean(tmp_path) is True
 
 

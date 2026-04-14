@@ -56,22 +56,35 @@ TEMPLATE_MARKERS = [
 
 
 def _working_tree_clean(project: Path | str) -> bool:
-    """True iff the project has no tracked modifications or staged changes.
+    """True iff the project has no user-owned dirty state.
 
-    Used at cycle start so we never wipe user work. Untracked files
-    (.sentinel/, .claude/, etc.) are not considered — those don't
-    threaten user work because reset --hard doesn't touch them, and
-    the between-item `git clean -fd` excludes them explicitly.
+    Used at cycle start so we never wipe user work. Covers:
+    - tracked modifications + staged changes (reset --hard would wipe)
+    - untracked files OUTSIDE sentinel's own directories (git clean -fd
+      between items would wipe)
+
+    Sentinel's own artifacts (.sentinel/, .claude/) don't count — the
+    between-item clean excludes them explicitly, and init commits the
+    .gitignore entries immediately.
     """
     result = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        ["git", "status", "--porcelain"],
         capture_output=True, text=True, cwd=project, timeout=10,
     )
     if result.returncode != 0:
         # Not a git repo or git missing — let the caller proceed; other
         # git calls will surface the real error downstream.
         return True
-    return not result.stdout.strip()
+    for line in result.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        filename = line[3:]
+        # Skip sentinel's own artifacts — excluded from clean anyway
+        if filename.startswith(".sentinel/") or filename.startswith(".claude/"):
+            continue
+        # Anything else is user state we can't risk clobbering
+        return False
+    return True
 
 
 def _reset_and_checkout(project: str, branch: str) -> bool:

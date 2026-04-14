@@ -123,6 +123,18 @@ async def run_cycle(
         console.print("[dim]  (dry run — will plan but not execute)[/dim]")
     console.print()
 
+    # Same guard as `sentinel work`: refuse to start on a dirty tree
+    # because between-item resets would silently wipe user work.
+    from sentinel.cli.work_cmd import _working_tree_clean
+    if not _working_tree_clean(project):
+        console.print(
+            "[red]  Working tree has uncommitted changes.[/red]\n"
+            "  sentinel resets the tree between items; running on a "
+            "dirty tree would destroy your work.\n"
+            "  Commit, stash, or discard your changes, then run again."
+        )
+        return
+
     # Budget check before starting
     budget = check_budget(
         project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
