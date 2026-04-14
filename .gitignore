@@ -46,8 +46,10 @@ uv.lock
 # for testing — these are generated per-run and shouldn't be committed)
 .sentinel/goals.md
 .sentinel/backlog.md
+.sentinel/lenses.md
 .sentinel/scans/
 .sentinel/state/
+.sentinel/proposals/
 
 # Test coverage
 coverage/
