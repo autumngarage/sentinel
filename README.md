@@ -51,15 +51,23 @@ Any role can use any provider.
 
 ## Quick start
 
+Install from source (not yet on PyPI or Homebrew):
+
 ```bash
-uv tool install sentinel        # or: pip install sentinel
+git clone https://github.com/henrymodisett/sentinel ~/Repos/sentinel
+cd ~/Repos/sentinel
+uv tool install .
+```
+
+Then, in any project:
+
+```bash
 cd your-project
+sentinel init                    # interactive, or: sentinel init --preset recommended
 sentinel work
 ```
 
-On first run, sentinel asks a few setup questions (or use `--preset recommended`) and writes `.sentinel/config.toml` + `.sentinel/goals.md`.
-
-**Fill in `goals.md` before the first real run.** It's the single biggest lever on output quality — lens generation is only as good as the project context you give it.
+`sentinel init` writes `.sentinel/config.toml` + `.sentinel/goals.md`. **Fill in `goals.md` before the first real run** — it's the biggest lever on output quality, since lens generation reads it for project context.
 
 ## The one command
 
@@ -74,7 +82,6 @@ sentinel work --dry-run         # plan, don't execute
 Supporting commands:
 
 ```bash
-sentinel status                 # quick health check
 sentinel cost                   # spend history
 sentinel providers              # provider detection + health
 ```
@@ -88,7 +95,7 @@ sentinel providers              # provider detection + health
 name = "my-project"
 
 [roles.monitor]
-provider = "ollama"
+provider = "local"              # Ollama, runs on your machine
 model = "qwen2.5-coder:14b"
 
 [roles.researcher]
