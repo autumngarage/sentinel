@@ -206,7 +206,7 @@ class TestProviderHelperWiring:
                 output_tokens=30,
                 cost_usd=0.0005,
             )
-            FakeProvider()._journal_call(started, response)
+            FakeProvider()._journal_call(started, response, was_clamped=False)
             assert len(j.provider_calls) == 1
             call = j.provider_calls[0]
             assert call.phase == "scan"
@@ -216,8 +216,57 @@ class TestProviderHelperWiring:
             assert call.output_tokens == 30
             assert call.cost_usd == 0.0005
             assert call.latency_ms >= 0
+            assert call.was_clamped is False
         finally:
             set_current_journal(None)
+
+    def test_provider_helper_records_clamped_state_as_passed(
+        self, tmp_path: Path,
+    ) -> None:
+        """was_clamped is captured by the provider BEFORE the call to
+        avoid the race where elapsed time during the call shrinks the
+        remaining budget. Verify the helper records exactly what was
+        passed, not what it would compute now."""
+        from sentinel.budget_ctx import set_cycle_deadline
+        from sentinel.providers.interface import (
+            ChatResponse,
+            Provider,
+            ProviderCapabilities,
+            ProviderName,
+        )
+
+        class FakeProvider(Provider):
+            name = ProviderName.GEMINI
+            cli_command = "fake"
+            capabilities = ProviderCapabilities(chat=True)
+            timeout_sec = 600
+
+            async def chat(self, prompt, system_prompt=None):  # noqa: ANN001, ANN201
+                return ChatResponse(content="ok", provider=self.name)
+
+            def detect(self):  # noqa: ANN201
+                from sentinel.providers.interface import ProviderStatus
+                return ProviderStatus(installed=True, authenticated=True)
+
+        j = _journal(tmp_path)
+        set_current_journal(j)
+        # Simulate: budget is wide open, so the call wasn't clamped at
+        # entry. If we computed `was_clamped` after the call returned,
+        # a brief delay could shrink the remaining budget below 600s
+        # and we'd misreport. Helper must use the value the caller
+        # captured at the start.
+        set_cycle_deadline(None)
+        try:
+            import time
+            FakeProvider()._journal_call(
+                time.perf_counter(),
+                ChatResponse(content="ok", provider=ProviderName.GEMINI),
+                was_clamped=False,
+            )
+            assert j.provider_calls[0].was_clamped is False
+        finally:
+            set_current_journal(None)
+            set_cycle_deadline(None)
 
 
 class TestUnusedSymbolsExist:

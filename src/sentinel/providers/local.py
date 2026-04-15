@@ -52,6 +52,7 @@ class LocalProvider(Provider):
         # though the CLI providers (Claude/Gemini/Codex) are bounded.
         from sentinel.budget_ctx import clamp_timeout
         http_timeout = clamp_timeout(self.timeout_sec)
+        was_clamped = http_timeout < self.timeout_sec
 
         # Return an error ChatResponse on timeout/connection error rather
         # than raising. The CLI providers all do this (TimeoutExpired →
@@ -77,21 +78,21 @@ class LocalProvider(Provider):
                 ),
                 provider=self.name,
             )
-            self._journal_call(started, response, error="timeout")
+            self._journal_call(started, response, was_clamped, error="timeout")
             return response
         except httpx.RequestError as e:
             response = ChatResponse(
                 content=f"Error: Ollama HTTP call failed: {e}",
                 provider=self.name,
             )
-            self._journal_call(started, response, error="request error")
+            self._journal_call(started, response, was_clamped, error="request error")
             return response
 
         if resp.status_code != 200:
             response = ChatResponse(
                 content=f"Error: Ollama returned {resp.status_code}", provider=self.name,
             )
-            self._journal_call(started, response, error=f"http {resp.status_code}")
+            self._journal_call(started, response, was_clamped, error=f"http {resp.status_code}")
             return response
 
         data = resp.json()
@@ -104,7 +105,7 @@ class LocalProvider(Provider):
             output_tokens=data.get("eval_count", 0),
             duration_ms=data.get("total_duration", 0) // 1_000_000,  # nanoseconds → ms
         )
-        self._journal_call(started, response)
+        self._journal_call(started, response, was_clamped)
         return response
 
     def detect(self) -> ProviderStatus:

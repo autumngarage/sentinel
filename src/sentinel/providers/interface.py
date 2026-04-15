@@ -209,21 +209,25 @@ class Provider(ABC):
         self,
         started_at: float,
         response: ChatResponse,
+        was_clamped: bool,
         error: str | None = None,
     ) -> None:
         """Append this call to the cycle's run journal (no-op outside a
-        cycle). Subclasses call this once at the end of every chat()
-        path so the journal sees latency, tokens, cost, and clamp
-        status. Computing was_clamped at call time means we record
-        what the budget actually constrained, not the configured max.
+        cycle). Subclasses call this once at the end of every chat() /
+        code() path so the journal sees latency, tokens, cost, and
+        clamp status.
+
+        `was_clamped` MUST be captured BEFORE the call (typically at
+        the same time as `started_at`). Computing it here would race:
+        by the time the call returns, more time has elapsed against
+        the cycle deadline, so an unclamped call could appear clamped
+        because the remaining budget shrank during the call itself.
         """
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
         from sentinel.journal import record_provider_call
 
         latency_ms = int((_time.perf_counter() - started_at) * 1000)
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         record_provider_call(
             provider=str(self.name),
             model=response.model or getattr(self, "model", "") or "",

@@ -343,6 +343,7 @@ async def _run_single_cycle(
             )
             if not budget_ok:
                 console.print(f"\n[yellow]  Stopping: {reason}[/yellow]")
+                journal.exit_reason = f"budget: {reason}"
                 break
 
             # --- 3. Scan if stale or missing ---
@@ -403,6 +404,7 @@ async def _run_single_cycle(
                 scan_file = _find_latest_scan(project)
                 if not scan_file:
                     journal.end_phase("plan", status="failed", error="no scan")
+                    journal.exit_reason = "no_scan_to_plan_from"
                     console.print("  [red]No scan to plan from[/red]")
                     break
                 actions = _parse_actions_from_scan(scan_file)
@@ -433,6 +435,7 @@ async def _run_single_cycle(
             items = _remaining_backlog_items(project)
             if not items:
                 console.print("[green]  Backlog empty. Done.[/green]")
+                journal.exit_reason = "backlog_empty"
                 break
 
             # Handle first execution — confirm unless --auto or --dry-run
@@ -445,6 +448,7 @@ async def _run_single_cycle(
                     "  Proceed with autonomous execution?", default=False,
                 ):
                     console.print("[yellow]  Stopped before execution.[/yellow]")
+                    journal.exit_reason = "user_declined"
                     return
                 console.print()
 
@@ -458,31 +462,58 @@ async def _run_single_cycle(
                     )
                 console.print()
                 console.print("[yellow]  Dry run — stopping[/yellow]")
+                journal.exit_reason = "dry_run"
                 break
 
             next_item = items[items_executed] if items_executed < len(items) else None
             if not next_item:
                 console.print("[green]  All items processed.[/green]")
+                journal.exit_reason = "all_items_processed"
                 break
 
             # Execute + review
+            from sentinel.journal import WorkItemRecord
+            wi_id = str(next_item.get("id", items_executed + 1))
+            wi_title = next_item.get("title", "(untitled)")
+            phase_label = f"execute:{wi_id}"
             set_current_phase("execute")
-            journal.start_phase(f"execute:{next_item.get('id', items_executed + 1)}")
+            journal.start_phase(phase_label)
             success = await _execute_and_review(
                 next_item, items_executed + 1,
                 project, original_branch,
                 coder, reviewer, config,
             )
-            journal.end_phase(
-                f"execute:{next_item.get('id', items_executed + 1)}",
-                status=success or "unknown",
+            journal.end_phase(phase_label, status=success or "unknown")
+
+            # Mirror the outcome into the work-items table so the journal
+            # shows what we ran, not just timings. coder_status mirrors
+            # the success token from _execute_and_review (approved, failed,
+            # changes_requested) — same vocabulary as items_approved/_failed
+            # accounting below.
+            wi_status = "succeeded" if success == "approved" else (
+                "failed" if success == "failed" else "in_progress"
             )
+            reviewer_verdict = success if success in (
+                "approved", "changes_requested",
+            ) else None
+            journal.record_work_item(WorkItemRecord(
+                work_item_id=wi_id,
+                title=wi_title,
+                coder_status=wi_status,
+                reviewer_verdict=reviewer_verdict,
+            ))
+
             items_executed += 1
             if success == "approved":
                 items_approved += 1
             elif success == "failed":
                 items_failed += 1
-        journal.exit_reason = "complete"
+        # Loop exits only via break paths above (each sets a specific
+        # exit_reason). Falling out the bottom of `while True` would mean
+        # we hit an unforeseen path — mark it as such rather than calling
+        # it "complete" and hiding the surprise.
+        if journal.exit_reason == "in_progress":
+            journal.exit_reason = "loop_ended_unexpectedly"
 
     except KeyboardInterrupt:
         journal.exit_reason = "interrupted"
