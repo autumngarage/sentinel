@@ -297,6 +297,21 @@ async def _run_single_cycle(
     if not config:
         return
 
+    # Prune aged-out run journals before the cycle starts. Silent on
+    # the common case (nothing expired), one-line note when something
+    # was actually removed. Failing prune doesn't block work.
+    from sentinel.prune import prune_runs
+    try:
+        removed = prune_runs(project, config.retention.runs_days)
+        if removed:
+            console.print(
+                f"  [dim]Pruned {removed} run journal"
+                f"{'s' if removed != 1 else ''} older than "
+                f"{config.retention.runs_days} days[/dim]\n"
+            )
+    except OSError as e:
+        console.print(f"  [yellow]Prune skipped: {e}[/yellow]\n")
+
     # --- Main work loop ---
     router = Router(config)
     monitor = Monitor(router)
