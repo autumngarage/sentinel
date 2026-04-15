@@ -14,7 +14,7 @@ ASSESS → PLAN → DELEGATE
   └────────────────┘
 ```
 
-1. **Assess.** Read `goals.md`, scan the code, generate 6–8 project-specific lenses (e.g. `risk-surface`, `cost-awareness`, `adoption`), evaluate the project through each.
+1. **Assess.** Read `README.md` / `CLAUDE.md` / `AGENTS.md` and any strategic docs in the repo, scan the code, generate 6–8 project-specific lenses (e.g. `risk-surface`, `cost-awareness`, `adoption`), evaluate the project through each.
 2. **Plan.** Produce a ranked backlog with acceptance criteria. Optionally sync to GitHub issues with `sentinel plan --sync-github`.
 3. **Delegate.** Hand each item to a coding agent. A different provider reviews.
 
@@ -22,7 +22,7 @@ A dedicated research phase (cross-provider comparison, consensus queries) is on 
 
 Two ideas do most of the work:
 
-- **Goals are derived, not stored.** Read from `goals.md`, `CLAUDE.md`, and `README.md` each cycle. No second source of truth to drift.
+- **Goals are derived, not stored.** Read from `README.md`, `CLAUDE.md`, `AGENTS.md`, and strategic docs in the repo each cycle. No dedicated sentinel config file for project context — no second source of truth to drift.
 - **Lenses are generated from your project, not shipped as fixed checklists.** For a trading system you'd get `risk-surface` and `reliability`; for a dev tool you'd get `craft` and `adoption`. Sentinel generates the lens set on first scan and persists it to `.sentinel/lenses.md` so subsequent scans use the same lenses (useful for trend tracking). Delete that file to regenerate.
 
 ## The five roles
@@ -120,7 +120,7 @@ model = "gemini-2.5-pro"
 daily_limit_usd = 15.00
 ```
 
-`.sentinel/goals.md` holds project context — what it is, its current stage, what matters most right now. Sentinel reads it every scan.
+Project context — what it is, current stage, what matters most right now — lives in your existing `README.md`, `CLAUDE.md`, `AGENTS.md`, and any strategic docs (architecture, vision, principles). Sentinel reads them every scan.
 
 ## Design principles
 
