@@ -110,6 +110,39 @@ class TestJournalShape:
         assert "Provider calls:** 2" in content
         assert "(1 clamped)" in content
 
+    def test_repeated_write_reuses_same_path(self, tmp_path: Path) -> None:
+        """Journal.write() is idempotent — incremental writes during a
+        cycle must land on the same file, not generate new collision-
+        suffixed names on every call."""
+        j = _journal(tmp_path)
+        first = j.write()
+        second = j.write()
+        third = j.write()
+        assert first == second == third
+
+    def test_two_journals_in_same_second_get_unique_paths(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two cycles started in the same wall-clock second (or even
+        the same wall-clock instant — same `started_at`) must NOT
+        overwrite each other's journals. The second writer gets a
+        numeric suffix; whoever calls write() first takes the clean
+        name."""
+        same_ts = 1_700_000_000.0  # arbitrary fixed timestamp
+        j1 = _journal(tmp_path)
+        j1.started_at = same_ts
+        j2 = _journal(tmp_path)
+        j2.started_at = same_ts
+
+        path1 = j1.write()
+        path2 = j2.write()
+
+        assert path1 != path2, (
+            "two journals started at the same second must not share a path"
+        )
+        assert path1.exists()
+        assert path2.exists()
+
     def test_partial_journal_writes_what_we_have(self, tmp_path: Path) -> None:
         """A journal that wrote during a still-running phase (cycle
         crashed mid-way) should still produce a usable file rather than

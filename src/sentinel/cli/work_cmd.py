@@ -486,16 +486,17 @@ async def _run_single_cycle(
             journal.end_phase(phase_label, status=success or "unknown")
 
             # Mirror the outcome into the work-items table so the journal
-            # shows what we ran, not just timings. coder_status mirrors
-            # the success token from _execute_and_review (approved, failed,
-            # changes_requested) — same vocabulary as items_approved/_failed
-            # accounting below.
-            wi_status = "succeeded" if success == "approved" else (
-                "failed" if success == "failed" else "in_progress"
-            )
-            reviewer_verdict = success if success in (
-                "approved", "changes_requested",
-            ) else None
+            # shows what we ran, not just timings. _execute_and_review
+            # returns one of: "failed" (coder errored before review),
+            # "approved", "changes", "rejected". Map all four explicitly:
+            # the previous mapping collapsed changes/rejected into
+            # in_progress with no reviewer verdict, hiding real outcomes.
+            wi_status, reviewer_verdict = {
+                "approved": ("succeeded", "approved"),
+                "changes": ("succeeded", "changes_requested"),
+                "rejected": ("succeeded", "rejected"),
+                "failed": ("failed", None),
+            }.get(success or "", ("unknown", None))
             journal.record_work_item(WorkItemRecord(
                 work_item_id=wi_id,
                 title=wi_title,

@@ -88,6 +88,11 @@ class Journal:
     phases: list[PhaseRecord] = field(default_factory=list)
     provider_calls: list[ProviderCall] = field(default_factory=list)
     work_items: list[WorkItemRecord] = field(default_factory=list)
+    # Resolved on first write() so incremental rewrites land on the same
+    # file. Otherwise two cycles started in the same wall-clock second
+    # (or two write() calls of the same journal) would race for the
+    # collision-suffixed name and produce duplicate or overwritten files.
+    _resolved_path: Path | None = field(default=None, repr=False)
 
     def start_phase(self, name: str) -> PhaseRecord:
         record = PhaseRecord(name=name, started_at=time.time())
@@ -125,16 +130,32 @@ class Journal:
         """Write the journal markdown. Idempotent — overwrites on
         subsequent calls so the file always reflects the latest state.
         Callers can write incrementally during the cycle to leave a
-        usable file even if the process crashes."""
+        usable file even if the process crashes.
+
+        The destination path is resolved once (on first write) and
+        reused for every subsequent write of the same Journal. Two
+        cycles started in the same second use the seconds-precision
+        timestamp PLUS a numeric suffix (-2, -3, ...) to stay unique;
+        the first one to call write() takes the un-suffixed name.
+        """
         if self.ended_at is None:
             self.ended_at = time.time()
+        if self._resolved_path is None:
+            self._resolved_path = self._resolve_unique_path()
+        self._resolved_path.write_text(self._render())
+        return self._resolved_path
+
+    def _resolve_unique_path(self) -> Path:
         runs_dir = self.project_path / ".sentinel" / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.fromtimestamp(self.started_at).strftime(
             "%Y-%m-%d-%H%M%S",
         )
         path = runs_dir / f"{ts}.md"
-        path.write_text(self._render())
+        n = 1
+        while path.exists():
+            n += 1
+            path = runs_dir / f"{ts}-{n}.md"
         return path
 
     def _render(self) -> str:
