@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path  # noqa: TC003 — runtime use via tmp_path
 
 from sentinel.journal import (
@@ -119,6 +120,151 @@ class TestJournalShape:
         second = j.write()
         third = j.write()
         assert first == second == third
+
+    def test_checkpoints_on_phase_start(self, tmp_path: Path) -> None:
+        """A phase transition must leave an up-to-date file on disk
+        BEFORE the phase body runs. Without this, a cycle that hangs
+        inside the phase produces no journal when killed externally."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        assert len(files) == 1, (
+            "start_phase must checkpoint so a killed cycle leaves evidence"
+        )
+        content = files[0].read_text()
+        assert "scan" in content
+
+    def test_checkpoints_on_provider_call_record(self, tmp_path: Path) -> None:
+        """Every recorded provider call updates the on-disk journal.
+        If the cycle dies mid-phase, the successful calls already
+        captured are still visible in the file."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.001, was_clamped=False,
+        ))
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+        assert "gemini" in content
+        assert "flash" in content
+
+    def test_checkpoints_on_work_item_record(self, tmp_path: Path) -> None:
+        j = _journal(tmp_path)
+        j.record_work_item(WorkItemRecord(
+            work_item_id="wi-1", title="Test", coder_status="succeeded",
+        ))
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+        assert "wi-1" in content
+        assert "succeeded" in content
+
+    def test_checkpoints_do_not_freeze_total_time(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: write() used to set ended_at on first call, so
+        every checkpoint after that rendered a stale ~0s Total time
+        (frozen at the first start_phase). Now write() leaves ended_at
+        alone; mark_ended is explicit and only called before the final
+        write. A long-running cycle's checkpoints must reflect
+        accumulating elapsed time, not a frozen zero."""
+        j = _journal(tmp_path)
+        # Simulate a cycle that started 5 seconds ago
+        j.started_at = time.time() - 5
+        j.start_phase("scan")
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+
+        # Parse the "Total time: X.Xs" line — must reflect ~5 seconds,
+        # not the ~0s that the frozen ended_at bug produced.
+        match = re.search(r"Total time:\*\* ([\d.]+)s", content)
+        assert match is not None, f"could not find Total time in:\n{content}"
+        total = float(match.group(1))
+        assert 4.5 <= total <= 10, (
+            f"checkpoint froze Total time at {total}s; expected ~5s "
+            f"(cycle started 5s ago, still running)"
+        )
+
+    def test_mark_ended_freezes_total_time(self, tmp_path: Path) -> None:
+        """After mark_ended, subsequent writes must NOT advance
+        Total time — that's the point of the explicit end signal."""
+        j = _journal(tmp_path)
+        j.started_at = time.time() - 3
+        j.mark_ended()
+        frozen = j.ended_at
+        assert frozen is not None
+
+        # Wait a moment; another write() must still use the frozen ts
+        time.sleep(0.1)
+        j.write()
+        assert j.ended_at == frozen, (
+            "mark_ended must be a one-shot freeze; further writes cannot "
+            "advance the end timestamp"
+        )
+
+    def test_failed_write_preserves_previous_checkpoint(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Atomic-replace guarantee: if a checkpoint write fails after
+        the first good checkpoint has landed, the previous file stays
+        intact. Rewriting the live file with write_text() would have
+        left a truncated/empty journal on a mid-write crash."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+        # First checkpoint landed — read it
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        original_files = list(runs_dir.glob("*.md"))
+        assert len(original_files) == 1
+        original_content = original_files[0].read_text()
+        assert "scan" in original_content
+
+        # Now sabotage the next write to fail mid-way — simulate
+        # write_text raising OSError (disk full, permission, etc.)
+        original_write_text = Path.write_text
+
+        def failing_write_text(self, *args, **kwargs):  # noqa: ANN001, ANN202
+            if self.suffix == ".tmp":
+                raise OSError("simulated disk full during checkpoint")
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+        # Next mutation — checkpoint tries to write, fails, swallows
+        j.start_phase("plan")
+
+        # The ORIGINAL journal file must still be intact. A non-atomic
+        # write would have left it truncated or empty.
+        final_content = original_files[0].read_text()
+        assert final_content == original_content, (
+            "failed atomic write clobbered the previous checkpoint"
+        )
+
+    def test_checkpoint_failure_does_not_crash(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """If the checkpoint write fails (full disk, permission error,
+        etc.), the method must not propagate the exception. The cycle
+        keeps running; the final finally-block write gets another try."""
+        j = _journal(tmp_path)
+
+        def fail_write() -> Path:
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(j, "write", fail_write)
+        # Should not raise
+        j.start_phase("scan")
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="x", model="y",
+            latency_ms=1, was_clamped=False,
+        ))
 
     def test_two_journals_in_same_second_get_unique_paths(
         self, tmp_path: Path,

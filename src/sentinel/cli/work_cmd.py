@@ -531,8 +531,11 @@ async def _run_single_cycle(
         # Return to original branch — reset first so a failed final
         # item doesn't leave the user stranded on a dirty feature branch
         _reset_and_checkout(str(project), original_branch)
-        # Write the journal regardless of how the cycle ended. Best-
-        # effort: a write failure here is not worth crashing the cycle.
+        # Freeze the end timestamp then write the journal once more.
+        # mark_ended is idempotent and must happen BEFORE the final
+        # write so the rendered Total time captures the actual cycle
+        # duration rather than "right now."
+        journal.mark_ended()
         try:
             journal_path = journal.write()
             console.print(

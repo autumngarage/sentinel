@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -101,6 +102,7 @@ class Journal:
     def start_phase(self, name: str) -> PhaseRecord:
         record = PhaseRecord(name=name, started_at=time.time())
         self.phases.append(record)
+        self._checkpoint()
         return record
 
     def end_phase(
@@ -116,6 +118,7 @@ class Journal:
                 record.ended_at = time.time()
                 record.status = status
                 record.error = error
+                self._checkpoint()
                 return
         # No matching open phase — record one so the data isn't lost
         record = PhaseRecord(
@@ -123,12 +126,38 @@ class Journal:
             status=status, error=error,
         )
         self.phases.append(record)
+        self._checkpoint()
 
     def record_provider_call(self, call: ProviderCall) -> None:
         self.provider_calls.append(call)
+        self._checkpoint()
 
     def record_work_item(self, item: WorkItemRecord) -> None:
         self.work_items.append(item)
+        self._checkpoint()
+
+    def _checkpoint(self) -> None:
+        """Rewrite the journal file with current state.
+
+        Called from every mutating method so a cycle that hangs inside
+        a phase still leaves an up-to-date file on disk. Without this,
+        the original finally-only write meant killing a stuck cycle
+        (SIGKILL from outside, pkill, etc.) produced no journal at all
+        — exactly the opposite of "partial file on crash."
+
+        Writes are cheap (small markdown file, few KB) and happen at
+        most once per provider call, so a realistic cycle writes
+        dozens of times per minute. If this ever becomes a perf
+        concern, gate it on a dirty-at-most-once-per-N-seconds check;
+        for now the frequent write IS the feature.
+        """
+        try:
+            self.write()
+        except OSError as e:
+            # Filesystem failures during checkpoint must not crash the
+            # cycle. Log and continue — the final write() in the
+            # caller's finally block gets another chance.
+            logger.warning("journal checkpoint failed: %s", e)
 
     def write(self) -> Path:
         """Write the journal markdown. Idempotent — overwrites on
@@ -136,18 +165,43 @@ class Journal:
         Callers can write incrementally during the cycle to leave a
         usable file even if the process crashes.
 
+        Does NOT set ended_at. Callers mark the cycle as ended
+        explicitly via `mark_ended()` before the final write; otherwise
+        the rendered "Total time" advances with each checkpoint rather
+        than freezing at the first write's timestamp. An earlier version
+        set ended_at here on the first call, which meant every checkpoint
+        after the first (and the final finally-block write) reported the
+        same stale total time near zero.
+
         The destination path is resolved once (on first write) and
         reused for every subsequent write of the same Journal. Two
         cycles started in the same second use the seconds-precision
         timestamp PLUS a numeric suffix (-2, -3, ...) to stay unique;
         the first one to call write() takes the un-suffixed name.
         """
-        if self.ended_at is None:
-            self.ended_at = time.time()
         if self._resolved_path is None:
             self._resolved_path = self._resolve_unique_path()
-        self._resolved_path.write_text(self._render())
+        # Atomic replace: write to a sibling temp file first, then
+        # os.replace() into place. Rewriting the live file with
+        # write_text() would leave a corrupted/empty journal if the
+        # process dies between truncation and write completion — exactly
+        # the crash-survival scenario this whole mechanism is meant to
+        # serve. os.replace is atomic on POSIX: either the new file is
+        # at the target path, or the old one still is, never a partial.
+        tmp = self._resolved_path.with_suffix(
+            self._resolved_path.suffix + ".tmp",
+        )
+        tmp.write_text(self._render())
+        os.replace(tmp, self._resolved_path)
         return self._resolved_path
+
+    def mark_ended(self) -> None:
+        """Freeze the cycle's end time. Call once at the terminal path
+        (normal exit, exception, KeyboardInterrupt — typically in a
+        finally block) before the final write. Idempotent: only the
+        first call takes effect."""
+        if self.ended_at is None:
+            self.ended_at = time.time()
 
     def _resolve_unique_path(self) -> Path:
         runs_dir = self.project_path / ".sentinel" / "runs"
