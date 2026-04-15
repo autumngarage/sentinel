@@ -54,7 +54,11 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
     # handles them as opaque entries with their own mtimes.
     for entry in runs_dir.iterdir():
         try:
-            mtime = entry.stat().st_mtime
+            # lstat (not stat) so symlinks report the symlink's own mtime,
+            # not the target's. Otherwise an old symlink pointing at a
+            # fresh file would skip the age check, never trigger pruning,
+            # and never give the symlink-unlink branch a chance to run.
+            mtime = entry.lstat().st_mtime
         except OSError as e:
             # File disappeared between iterdir and stat (concurrent prune,
             # external deletion). Skip it — next cycle will find it gone.
@@ -65,8 +69,16 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
             continue
 
         try:
-            if entry.is_dir():
-                # Recursive rmdir for entry-as-directory layouts
+            if entry.is_symlink():
+                # CRITICAL: never recurse into a symlinked dir. If
+                # `.sentinel/runs/foo` is a symlink to `~/important/`,
+                # following it and rmtree-ing the target would destroy
+                # files outside the prune scope. unlink() removes the
+                # symlink itself, leaving the target untouched.
+                entry.unlink()
+            elif entry.is_dir():
+                # Real directory — recursive removal, but the inner
+                # walk also checks is_symlink() at each level.
                 _rmtree(entry)
             else:
                 entry.unlink()
@@ -80,11 +92,20 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
 
 
 def _rmtree(path: Path) -> None:
-    """Recursive directory removal. Stdlib shutil.rmtree exists but
-    we keep this local + minimal to avoid an extra import path and so
-    OSError handling stays in one place."""
+    """Recursive directory removal that refuses to follow symlinks.
+
+    Stdlib shutil.rmtree exists but we keep this local + minimal so
+    OSError handling stays in one place AND so the symlink-safety
+    contract is enforced at every level of the walk, not just the
+    top. A symlink to anywhere outside the prune scope is unlinked,
+    never traversed.
+    """
     for child in path.iterdir():
-        if child.is_dir():
+        if child.is_symlink():
+            # Same protection as the top-level walk — a symlinked
+            # subdirectory is unlinked, not followed.
+            child.unlink()
+        elif child.is_dir():
             _rmtree(child)
         else:
             child.unlink()

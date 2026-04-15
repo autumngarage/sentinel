@@ -103,6 +103,72 @@ class TestPruneRuns:
         assert (runs / "b.md").exists()
         assert (runs / "c.md").exists()
 
+    def test_symlinked_entry_is_unlinked_not_followed(
+        self, tmp_path: Path,
+    ) -> None:
+        """If runs/ contains a symlink (top-level or nested) to data
+        outside the prune scope, prune must remove the symlink itself
+        and never touch the target. A bug here would let prune destroy
+        arbitrary files anywhere a symlink points — catastrophic."""
+        runs = tmp_path / ".sentinel" / "runs"
+        runs.mkdir(parents=True)
+
+        # Outside-prune-scope target the symlink will point to
+        outside = tmp_path / "important"
+        outside.mkdir()
+        precious = outside / "precious.txt"
+        precious.write_text("must not be deleted")
+
+        # Top-level symlink in runs/ pointing at the outside dir
+        link = runs / "old-link"
+        link.symlink_to(outside)
+        # Age the symlink so it's older than retention
+        past = time.time() - 100 * 86400
+        os.utime(link, (past, past), follow_symlinks=False)
+
+        prune_runs(tmp_path, retention_days=30)
+
+        assert not link.exists(), "symlink itself should be removed"
+        assert outside.exists(), (
+            "symlink target directory must NOT be deleted by prune"
+        )
+        assert precious.exists(), (
+            "files inside the symlink target must NOT be touched by prune"
+        )
+        assert precious.read_text() == "must not be deleted"
+
+    def test_nested_symlink_inside_real_dir_not_followed(
+        self, tmp_path: Path,
+    ) -> None:
+        """Even when prune recurses into a real expired directory, any
+        symlink it encounters during the walk must be unlinked, not
+        traversed. Defense in depth at every level of the recursion."""
+        runs = tmp_path / ".sentinel" / "runs"
+        old_dir = runs / "2026-01-01-1200"
+        old_dir.mkdir(parents=True)
+        (old_dir / "events.jsonl").write_text("{}")
+
+        # Nested symlink inside the to-be-pruned directory
+        outside = tmp_path / "outside-data"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("untouchable")
+        nested_link = old_dir / "linked-data"
+        nested_link.symlink_to(outside)
+
+        # Age every entry past retention
+        past = time.time() - 100 * 86400
+        for p in [old_dir, old_dir / "events.jsonl"]:
+            os.utime(p, (past, past))
+        os.utime(nested_link, (past, past), follow_symlinks=False)
+
+        prune_runs(tmp_path, retention_days=30)
+
+        assert not old_dir.exists(), "expired dir should be gone"
+        assert outside.exists(), "symlink target must survive"
+        assert (outside / "secret.txt").exists(), (
+            "files inside the symlink target must NOT be touched"
+        )
+
     def test_disappearing_entry_does_not_crash(self, tmp_path: Path) -> None:
         """A file that vanishes between iterdir and stat (concurrent
         prune from another process, external deletion) must not crash."""
