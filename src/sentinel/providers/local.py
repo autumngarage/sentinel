@@ -44,10 +44,40 @@ class LocalProvider(Provider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(
-                f"{self.endpoint}/api/chat",
-                json={"model": self.model, "messages": messages, "stream": False},
+        # Ollama goes over HTTP, not run_cli_async, so it needs to consult
+        # the cycle deadline directly. Without this clamp, a slow local
+        # model call can blow past `sentinel work --budget 10m` even
+        # though the CLI providers (Claude/Gemini/Codex) are bounded.
+        from sentinel.budget_ctx import clamp_timeout
+        http_timeout = clamp_timeout(self.timeout_sec)
+
+        # Return an error ChatResponse on timeout/connection error rather
+        # than raising. The CLI providers all do this (TimeoutExpired →
+        # error ChatResponse) so scan-failure + partial-persist handling
+        # works uniformly; without it, an Ollama timeout would raise a
+        # traceback out of Monitor.assess and bypass _persist_scan.
+        try:
+            async with httpx.AsyncClient(timeout=http_timeout) as client:
+                resp = await client.post(
+                    f"{self.endpoint}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                    },
+                )
+        except httpx.TimeoutException:
+            return ChatResponse(
+                content=(
+                    f"Error: Ollama HTTP call timed out after "
+                    f"{http_timeout}s"
+                ),
+                provider=self.name,
+            )
+        except httpx.RequestError as e:
+            return ChatResponse(
+                content=f"Error: Ollama HTTP call failed: {e}",
+                provider=self.name,
             )
 
         if resp.status_code != 200:
