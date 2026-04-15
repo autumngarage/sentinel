@@ -164,18 +164,32 @@ class Journal:
         Callers can write incrementally during the cycle to leave a
         usable file even if the process crashes.
 
+        Does NOT set ended_at. Callers mark the cycle as ended
+        explicitly via `mark_ended()` before the final write; otherwise
+        the rendered "Total time" advances with each checkpoint rather
+        than freezing at the first write's timestamp. An earlier version
+        set ended_at here on the first call, which meant every checkpoint
+        after the first (and the final finally-block write) reported the
+        same stale total time near zero.
+
         The destination path is resolved once (on first write) and
         reused for every subsequent write of the same Journal. Two
         cycles started in the same second use the seconds-precision
         timestamp PLUS a numeric suffix (-2, -3, ...) to stay unique;
         the first one to call write() takes the un-suffixed name.
         """
-        if self.ended_at is None:
-            self.ended_at = time.time()
         if self._resolved_path is None:
             self._resolved_path = self._resolve_unique_path()
         self._resolved_path.write_text(self._render())
         return self._resolved_path
+
+    def mark_ended(self) -> None:
+        """Freeze the cycle's end time. Call once at the terminal path
+        (normal exit, exception, KeyboardInterrupt — typically in a
+        finally block) before the final write. Idempotent: only the
+        first call takes effect."""
+        if self.ended_at is None:
+            self.ended_at = time.time()
 
     def _resolve_unique_path(self) -> Path:
         runs_dir = self.project_path / ".sentinel" / "runs"

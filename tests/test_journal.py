@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path  # noqa: TC003 — runtime use via tmp_path
 
 from sentinel.journal import (
@@ -163,6 +164,51 @@ class TestJournalShape:
         content = files[0].read_text()
         assert "wi-1" in content
         assert "succeeded" in content
+
+    def test_checkpoints_do_not_freeze_total_time(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: write() used to set ended_at on first call, so
+        every checkpoint after that rendered a stale ~0s Total time
+        (frozen at the first start_phase). Now write() leaves ended_at
+        alone; mark_ended is explicit and only called before the final
+        write. A long-running cycle's checkpoints must reflect
+        accumulating elapsed time, not a frozen zero."""
+        j = _journal(tmp_path)
+        # Simulate a cycle that started 5 seconds ago
+        j.started_at = time.time() - 5
+        j.start_phase("scan")
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+
+        # Parse the "Total time: X.Xs" line — must reflect ~5 seconds,
+        # not the ~0s that the frozen ended_at bug produced.
+        match = re.search(r"Total time:\*\* ([\d.]+)s", content)
+        assert match is not None, f"could not find Total time in:\n{content}"
+        total = float(match.group(1))
+        assert 4.5 <= total <= 10, (
+            f"checkpoint froze Total time at {total}s; expected ~5s "
+            f"(cycle started 5s ago, still running)"
+        )
+
+    def test_mark_ended_freezes_total_time(self, tmp_path: Path) -> None:
+        """After mark_ended, subsequent writes must NOT advance
+        Total time — that's the point of the explicit end signal."""
+        j = _journal(tmp_path)
+        j.started_at = time.time() - 3
+        j.mark_ended()
+        frozen = j.ended_at
+        assert frozen is not None
+
+        # Wait a moment; another write() must still use the frozen ts
+        time.sleep(0.1)
+        j.write()
+        assert j.ended_at == frozen, (
+            "mark_ended must be a one-shot freeze; further writes cannot "
+            "advance the end timestamp"
+        )
 
     def test_checkpoint_failure_does_not_crash(
         self, tmp_path: Path, monkeypatch,
