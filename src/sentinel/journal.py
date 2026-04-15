@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -180,7 +181,18 @@ class Journal:
         """
         if self._resolved_path is None:
             self._resolved_path = self._resolve_unique_path()
-        self._resolved_path.write_text(self._render())
+        # Atomic replace: write to a sibling temp file first, then
+        # os.replace() into place. Rewriting the live file with
+        # write_text() would leave a corrupted/empty journal if the
+        # process dies between truncation and write completion — exactly
+        # the crash-survival scenario this whole mechanism is meant to
+        # serve. os.replace is atomic on POSIX: either the new file is
+        # at the target path, or the old one still is, never a partial.
+        tmp = self._resolved_path.with_suffix(
+            self._resolved_path.suffix + ".tmp",
+        )
+        tmp.write_text(self._render())
+        os.replace(tmp, self._resolved_path)
         return self._resolved_path
 
     def mark_ended(self) -> None:

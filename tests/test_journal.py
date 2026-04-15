@@ -210,6 +210,43 @@ class TestJournalShape:
             "advance the end timestamp"
         )
 
+    def test_failed_write_preserves_previous_checkpoint(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Atomic-replace guarantee: if a checkpoint write fails after
+        the first good checkpoint has landed, the previous file stays
+        intact. Rewriting the live file with write_text() would have
+        left a truncated/empty journal on a mid-write crash."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+        # First checkpoint landed — read it
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        original_files = list(runs_dir.glob("*.md"))
+        assert len(original_files) == 1
+        original_content = original_files[0].read_text()
+        assert "scan" in original_content
+
+        # Now sabotage the next write to fail mid-way — simulate
+        # write_text raising OSError (disk full, permission, etc.)
+        original_write_text = Path.write_text
+
+        def failing_write_text(self, *args, **kwargs):  # noqa: ANN001, ANN202
+            if self.suffix == ".tmp":
+                raise OSError("simulated disk full during checkpoint")
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+        # Next mutation — checkpoint tries to write, fails, swallows
+        j.start_phase("plan")
+
+        # The ORIGINAL journal file must still be intact. A non-atomic
+        # write would have left it truncated or empty.
+        final_content = original_files[0].read_text()
+        assert final_content == original_content, (
+            "failed atomic write clobbered the previous checkpoint"
+        )
+
     def test_checkpoint_failure_does_not_crash(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
