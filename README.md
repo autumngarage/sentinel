@@ -68,7 +68,7 @@ sentinel init                    # interactive, or: sentinel init --preset recom
 sentinel work
 ```
 
-`sentinel init` writes `.sentinel/config.toml` + `.sentinel/goals.md`. **Fill in `goals.md` before the first real run** — it's the biggest lever on output quality, since lens generation reads it for project context.
+`sentinel init` writes `.sentinel/config.toml` and installs the Claude Code agents. No separate goals file — sentinel derives project context from `README.md`, `CLAUDE.md`, `AGENTS.md`, and any strategic docs it finds (`docs/`, `principles/`, architecture/vision/thesis files). Keep those up to date and lens generation stays sharp. `.sentinel/goals.md` is still read if you create one manually, but it's optional legacy, not the source of truth.
 
 ## The one command
 
