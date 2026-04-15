@@ -120,6 +120,69 @@ class TestJournalShape:
         third = j.write()
         assert first == second == third
 
+    def test_checkpoints_on_phase_start(self, tmp_path: Path) -> None:
+        """A phase transition must leave an up-to-date file on disk
+        BEFORE the phase body runs. Without this, a cycle that hangs
+        inside the phase produces no journal when killed externally."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        assert len(files) == 1, (
+            "start_phase must checkpoint so a killed cycle leaves evidence"
+        )
+        content = files[0].read_text()
+        assert "scan" in content
+
+    def test_checkpoints_on_provider_call_record(self, tmp_path: Path) -> None:
+        """Every recorded provider call updates the on-disk journal.
+        If the cycle dies mid-phase, the successful calls already
+        captured are still visible in the file."""
+        j = _journal(tmp_path)
+        j.start_phase("scan")
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.001, was_clamped=False,
+        ))
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+        assert "gemini" in content
+        assert "flash" in content
+
+    def test_checkpoints_on_work_item_record(self, tmp_path: Path) -> None:
+        j = _journal(tmp_path)
+        j.record_work_item(WorkItemRecord(
+            work_item_id="wi-1", title="Test", coder_status="succeeded",
+        ))
+
+        runs_dir = tmp_path / ".sentinel" / "runs"
+        files = list(runs_dir.glob("*.md"))
+        content = files[0].read_text()
+        assert "wi-1" in content
+        assert "succeeded" in content
+
+    def test_checkpoint_failure_does_not_crash(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """If the checkpoint write fails (full disk, permission error,
+        etc.), the method must not propagate the exception. The cycle
+        keeps running; the final finally-block write gets another try."""
+        j = _journal(tmp_path)
+
+        def fail_write() -> Path:
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(j, "write", fail_write)
+        # Should not raise
+        j.start_phase("scan")
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="x", model="y",
+            latency_ms=1, was_clamped=False,
+        ))
+
     def test_two_journals_in_same_second_get_unique_paths(
         self, tmp_path: Path,
     ) -> None:

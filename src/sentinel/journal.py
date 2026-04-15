@@ -101,6 +101,7 @@ class Journal:
     def start_phase(self, name: str) -> PhaseRecord:
         record = PhaseRecord(name=name, started_at=time.time())
         self.phases.append(record)
+        self._checkpoint()
         return record
 
     def end_phase(
@@ -116,6 +117,7 @@ class Journal:
                 record.ended_at = time.time()
                 record.status = status
                 record.error = error
+                self._checkpoint()
                 return
         # No matching open phase — record one so the data isn't lost
         record = PhaseRecord(
@@ -123,12 +125,38 @@ class Journal:
             status=status, error=error,
         )
         self.phases.append(record)
+        self._checkpoint()
 
     def record_provider_call(self, call: ProviderCall) -> None:
         self.provider_calls.append(call)
+        self._checkpoint()
 
     def record_work_item(self, item: WorkItemRecord) -> None:
         self.work_items.append(item)
+        self._checkpoint()
+
+    def _checkpoint(self) -> None:
+        """Rewrite the journal file with current state.
+
+        Called from every mutating method so a cycle that hangs inside
+        a phase still leaves an up-to-date file on disk. Without this,
+        the original finally-only write meant killing a stuck cycle
+        (SIGKILL from outside, pkill, etc.) produced no journal at all
+        — exactly the opposite of "partial file on crash."
+
+        Writes are cheap (small markdown file, few KB) and happen at
+        most once per provider call, so a realistic cycle writes
+        dozens of times per minute. If this ever becomes a perf
+        concern, gate it on a dirty-at-most-once-per-N-seconds check;
+        for now the frequent write IS the feature.
+        """
+        try:
+            self.write()
+        except OSError as e:
+            # Filesystem failures during checkpoint must not crash the
+            # cycle. Log and continue — the final write() in the
+            # caller's finally block gets another chance.
+            logger.warning("journal checkpoint failed: %s", e)
 
     def write(self) -> Path:
         """Write the journal markdown. Idempotent — overwrites on
