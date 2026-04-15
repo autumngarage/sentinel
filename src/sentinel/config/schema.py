@@ -96,6 +96,20 @@ class CoderConfig(BaseModel):
     max_turns: int = 40
 
 
+class RetentionConfig(BaseModel):
+    """How long sentinel keeps run-scoped artifacts on disk.
+
+    Long-lived artifacts (`.sentinel/scans/`, `.sentinel/verifications.jsonl`,
+    `.sentinel/backlog.md`, `.sentinel/proposals/`) are NOT pruned — they
+    represent the project's history. Only `.sentinel/runs/` (the per-cycle
+    journals introduced in the run-journal mechanism) ages out.
+
+    Default of 30 days fits a `--every 10m` cadence (~4300 cycles/month)
+    without bloating the project. Set to 0 to disable pruning entirely.
+    """
+    runs_days: int = 30
+
+
 class RolesConfig(BaseModel):
     monitor: RoleConfig
     researcher: RoleConfig
@@ -116,3 +130,4 @@ class SentinelConfig(BaseModel):
     local: LocalConfig = Field(default_factory=LocalConfig)
     scan: ScanConfig = Field(default_factory=ScanConfig)
     coder: CoderConfig = Field(default_factory=CoderConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
