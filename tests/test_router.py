@@ -256,6 +256,22 @@ class TestCustomRules:
         router.get_provider(RoleName.MONITOR)  # no task → no rule
         assert consume_pending_routing_reason() == ""
 
+    def test_get_provider_accepts_bare_string_role(
+        self, gemini_config: SentinelConfig,
+    ) -> None:
+        """Regression: dogfood 2026-04-16 crashed with
+        `AttributeError: 'str' object has no attribute 'value'` because
+        the override-log line used `role.value`. Callers in the roles
+        layer pass bare strings ("monitor"), not RoleName enum values.
+        Both must work — locks in the str(role) fix."""
+        router = Router(gemini_config)
+        # Bare string, not enum — must not crash even when an override
+        # fires and the log line tries to render the role name.
+        provider = router.get_provider("monitor", task="synthesize")
+        # Sanity: the routing override actually fired (proves we hit
+        # the formatting code path in question)
+        assert provider.model == "gemini-2.5-pro"
+
 
 class TestMissingLocalModels:
     """Pre-flight check: any role configured for local (ollama) needs
