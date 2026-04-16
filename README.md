@@ -53,9 +53,10 @@ Any role can use any provider, with one constraint: the **Coder** needs agentic-
 ## Quick start
 
 ```bash
-brew tap henrymodisett/sentinel
-brew install sentinel
+brew install henrymodisett/sentinel/sentinel
 ```
+
+(There's an unrelated macOS app cask also named `sentinel`, so the tap-prefixed form disambiguates.)
 
 Or from source:
 
