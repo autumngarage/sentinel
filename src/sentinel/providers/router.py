@@ -178,7 +178,7 @@ class Router:
                     # the chosen one — no override, no log line.
                     return configured
                 _console.print(
-                    f"[dim][router] {role.value}/{task or '(no task)'}: "
+                    f"[dim][router] {str(role)}/{task or '(no task)'}: "
                     f"{configured.model} → {rule.override_model} "
                     f"({rule.name})[/dim]"
                 )
