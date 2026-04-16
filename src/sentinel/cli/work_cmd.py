@@ -338,6 +338,22 @@ async def _run_single_cycle(
             f"{'s' if orphans != 1 else ''} from prior crashed runs[/dim]"
         )
 
+    # Pre-flight: shipping requirements. Skipped in dry-run mode since
+    # we never reach ship_pr. Checks gh auth, origin remote.
+    # Codex flagged that `which gh` alone isn't enough — an installed-
+    # but-unauthenticated gh surfaces as a cryptic error deep inside
+    # the ship step. Better to fail fast with an actionable message.
+    if not dry_run:
+        ship_errors = _check_shipping_preflight(project)
+        if ship_errors:
+            console.print(
+                "[red]  Shipping preflight failed — sentinel can't open "
+                "PRs until these are resolved:[/red]"
+            )
+            for err in ship_errors:
+                console.print(f"    {err}")
+            return
+
     # Prune aged-out run journals before the cycle starts. Silent on
     # the common case (nothing expired), one-line note when something
     # was actually removed. Failing prune doesn't block work.
@@ -737,6 +753,52 @@ def _check_all_budgets(
             return False, f"time budget reached ({mins} min)"
 
     return True, ""
+
+
+def _check_shipping_preflight(project: Path) -> list[str]:
+    """Return actionable error messages for anything that would block
+    PR shipping. Empty list means all preconditions are met.
+
+    Only checks things the user can fix from the CLI: gh installation,
+    gh authentication, and the existence of an `origin` remote. Branch
+    protection is NOT a precondition — ship_pr degrades gracefully
+    (creates the PR without arming auto-merge) when the base branch
+    is unprotected.
+    """
+    import shutil
+
+    errors: list[str] = []
+
+    if not shutil.which("gh"):
+        errors.append(
+            "[bold]gh[/bold] not found on PATH. Install with: "
+            "[bold]brew install gh[/bold]"
+        )
+        # If gh is missing, the auth check can't run — return early.
+        return errors
+
+    auth_result = subprocess.run(
+        ["gh", "auth", "status"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if auth_result.returncode != 0:
+        errors.append(
+            "gh is not authenticated. Run: [bold]gh auth login[/bold]"
+        )
+
+    # Check origin remote — sentinel pushes to `origin` by convention.
+    remote_result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        capture_output=True, text=True, cwd=str(project),
+        timeout=10, check=False,
+    )
+    if remote_result.returncode != 0:
+        errors.append(
+            "No [bold]origin[/bold] remote configured. Add one with: "
+            "[bold]git remote add origin <url>[/bold]"
+        )
+
+    return errors
 
 
 def _build_pr_body(
