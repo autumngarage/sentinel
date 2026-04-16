@@ -204,3 +204,41 @@ class Router:
             "gemini": GeminiProvider().detect(),
             "ollama": LocalProvider().detect(),
         }
+
+    def missing_local_models(self) -> list[tuple[str, str]]:
+        """For each role configured to use the local (ollama) provider,
+        check whether the configured model is actually pulled on this
+        machine. Returns a list of `(role, missing_model)` pairs — empty
+        means every required model is available.
+
+        Ollama is unique among providers in that the user can fix a
+        missing-model failure with one CLI command (`ollama pull X`),
+        so we surface this as a pre-flight check rather than letting
+        the first call fail with a less actionable error.
+        """
+        local_roles: list[tuple[str, str]] = []
+        for role_name, role_config in (
+            ("monitor", self._config.roles.monitor),
+            ("researcher", self._config.roles.researcher),
+            ("planner", self._config.roles.planner),
+            ("coder", self._config.roles.coder),
+            ("reviewer", self._config.roles.reviewer),
+        ):
+            if role_config.provider.value == "local":
+                local_roles.append((role_name, role_config.model))
+
+        if not local_roles:
+            return []
+
+        # One detection call returns all pulled models — avoids hitting
+        # ollama's HTTP endpoint once per local-role.
+        status = LocalProvider(
+            endpoint=self._config.local.ollama_endpoint,
+        ).detect()
+        if not status.installed:
+            # Treat every required model as missing if ollama itself
+            # isn't installed — the message naturally tells the user
+            # to install ollama first.
+            return local_roles
+        pulled = set(status.models)
+        return [(role, model) for role, model in local_roles if model not in pulled]

@@ -218,3 +218,104 @@ class TestCustomRules:
         provider = router.get_provider(RoleName.MONITOR, task="synthesize")
         # Without rules, configured default wins regardless of task.
         assert provider.model == "gemini-2.5-flash"
+
+
+class TestMissingLocalModels:
+    """Pre-flight check: any role configured for local (ollama) needs
+    its model already pulled, otherwise sentinel can't start. We surface
+    the exact `ollama pull` command rather than letting the first
+    provider call die with an obscure error."""
+
+    def test_no_local_roles_returns_empty(
+        self, gemini_config: SentinelConfig,
+    ) -> None:
+        """Configs that don't use ollama at all skip the check entirely."""
+        router = Router(gemini_config)
+        assert router.missing_local_models() == []
+
+    def test_local_role_with_missing_model_reported(
+        self, monkeypatch,
+    ) -> None:
+        """Monitor configured for local/qwen2.5-coder:14b but only
+        llama3.2:3b is pulled — the missing pair is reported with the
+        role context so the message can name which role needs which model."""
+        from sentinel.providers import local as local_module
+        from sentinel.providers.interface import ProviderStatus
+
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+        )
+
+        def fake_detect(self):  # noqa: ANN001, ANN202
+            return ProviderStatus(
+                installed=True, authenticated=True, models=["llama3.2:3b"],
+            )
+
+        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+
+        router = Router(cfg)
+        missing = router.missing_local_models()
+        assert missing == [("monitor", "qwen2.5-coder:14b")]
+
+    def test_local_role_with_pulled_model_passes(
+        self, monkeypatch,
+    ) -> None:
+        from sentinel.providers import local as local_module
+        from sentinel.providers.interface import ProviderStatus
+
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+        )
+
+        def fake_detect(self):  # noqa: ANN001, ANN202
+            return ProviderStatus(
+                installed=True, authenticated=True,
+                models=["qwen2.5-coder:14b", "llama3.2:3b"],
+            )
+
+        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+        router = Router(cfg)
+        assert router.missing_local_models() == []
+
+    def test_ollama_not_installed_reports_all_local_models(
+        self, monkeypatch,
+    ) -> None:
+        """If ollama itself isn't installed, every required model is
+        effectively missing — the message tells the user to install
+        ollama first by surfacing the pull commands they'll need next."""
+        from sentinel.providers import local as local_module
+        from sentinel.providers.interface import ProviderStatus
+
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "local", "model": "llama3.2:3b"},
+                "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+        )
+
+        def fake_detect(self):  # noqa: ANN001, ANN202
+            return ProviderStatus(installed=False, authenticated=False)
+
+        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+        router = Router(cfg)
+        missing = router.missing_local_models()
+        assert ("monitor", "qwen2.5-coder:14b") in missing
+        assert ("researcher", "llama3.2:3b") in missing

@@ -309,6 +309,23 @@ async def _run_single_cycle(
     if not config:
         return
 
+    # Pre-flight: any role configured for the local (ollama) provider
+    # needs its model already pulled. Surfacing this as an actionable
+    # `ollama pull X` message is much friendlier than letting the first
+    # provider call fail with a less obvious error from inside a phase.
+    router_for_check = Router(config)
+    missing = router_for_check.missing_local_models()
+    if missing:
+        console.print(
+            "[red]  Missing local models — sentinel can't start until "
+            "they're pulled:[/red]"
+        )
+        for role, model in missing:
+            console.print(
+                f"    {role}: [bold]ollama pull {model}[/bold]"
+            )
+        return
+
     # Prune aged-out run journals before the cycle starts. Silent on
     # the common case (nothing expired), one-line note when something
     # was actually removed. Failing prune doesn't block work.
@@ -337,7 +354,9 @@ async def _run_single_cycle(
     set_current_journal(journal)
 
     # --- Main work loop ---
-    router = Router(config)
+    # Reuse the router built for the pre-flight model check so we don't
+    # initialize providers twice.
+    router = router_for_check
     monitor = Monitor(router)
     coder = Coder(router)
     reviewer = Reviewer(router)
