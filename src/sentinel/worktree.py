@@ -20,12 +20,15 @@ from __future__ import annotations
 import contextlib
 import logging
 import shutil
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sentinel.git_ops import branch_exists, run_git
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
