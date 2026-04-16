@@ -73,21 +73,33 @@ class GeminiProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Gemini CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
             self._journal_call(started, response, was_clamped, error="timeout")
             return response
+
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
         if result.returncode != 0:
             response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped, error="non-zero exit")
             return response
 
-        data = parse_json_safe(result.stdout)
+        data = parse_json_safe(stdout)
         if not data:
             # Gemini CLI sometimes outputs plain text
             response = ChatResponse(
-                content=result.stdout.strip(), provider=self.name, model=self.model,
+                content=stdout.strip(),
+                provider=self.name,
+                model=self.model,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped)
             return response
@@ -108,6 +120,8 @@ class GeminiProvider(Provider):
             input_tokens=total_input,
             output_tokens=total_output,
             session_id=data.get("session_id"),
+            stderr=stderr,
+            raw_stdout=stdout,
         )
         self._journal_call(started, response, was_clamped)
         return response

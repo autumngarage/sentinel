@@ -65,19 +65,30 @@ class ClaudeProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
             self._journal_call(started, response, was_clamped, error="timeout")
             return response
+
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
         if result.returncode != 0:
             response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped, error="non-zero exit")
             return response
 
-        data = parse_json_safe(result.stdout)
+        data = parse_json_safe(stdout)
         if not data:
-            response = ChatResponse(content=result.stdout, provider=self.name)
+            response = ChatResponse(
+                content=stdout, provider=self.name,
+                stderr=stderr, raw_stdout=stdout,
+            )
             self._journal_call(started, response, was_clamped, error="parse failure")
             return response
 
@@ -86,6 +97,8 @@ class ClaudeProvider(Provider):
             response = ChatResponse(
                 content=f"Error: {data.get('result', 'unknown error')}",
                 provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped, error="cli is_error")
             return response
@@ -100,6 +113,8 @@ class ClaudeProvider(Provider):
             cost_usd=data.get("total_cost_usd", 0.0),
             duration_ms=data.get("duration_ms", 0),
             session_id=data.get("session_id"),
+            stderr=stderr,
+            raw_stdout=stdout,
         )
         self._journal_call(started, response, was_clamped)
         return response

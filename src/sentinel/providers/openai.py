@@ -80,23 +80,33 @@ class OpenAIProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
             self._journal_call(started, response, was_clamped, error="timeout")
             return response
+
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
         if result.returncode != 0:
             response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped, error="non-zero exit")
             return response
 
-        content, total_input, total_output = self._parse_ndjson(result.stdout)
+        content, total_input, total_output = self._parse_ndjson(stdout)
         response = ChatResponse(
             content=content,
             model=self.model,
             provider=self.name,
             input_tokens=total_input,
             output_tokens=total_output,
+            stderr=stderr,
+            raw_stdout=stdout,
         )
         self._journal_call(started, response, was_clamped)
         return response
@@ -123,23 +133,33 @@ class OpenAIProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
             self._journal_call(started, response, was_clamped, error="timeout")
             return response
+
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
         if result.returncode != 0:
             response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
             self._journal_call(started, response, was_clamped, error="non-zero exit")
             return response
 
-        content, total_input, total_output = self._parse_ndjson(result.stdout)
+        content, total_input, total_output = self._parse_ndjson(stdout)
         response = ChatResponse(
             content=content,
             model=self.model,
             provider=self.name,
             input_tokens=total_input,
             output_tokens=total_output,
+            stderr=stderr,
+            raw_stdout=stdout,
         )
         self._journal_call(started, response, was_clamped)
         return response

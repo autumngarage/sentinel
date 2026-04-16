@@ -77,6 +77,7 @@ class LocalProvider(Provider):
                     f"{http_timeout}s"
                 ),
                 provider=self.name,
+                stderr=f"(timeout after {http_timeout}s — no response body)",
             )
             self._journal_call(started, response, was_clamped, error="timeout")
             return response
@@ -84,13 +85,16 @@ class LocalProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Ollama HTTP call failed: {e}",
                 provider=self.name,
+                stderr=str(e),
             )
             self._journal_call(started, response, was_clamped, error="request error")
             return response
 
         if resp.status_code != 200:
             response = ChatResponse(
-                content=f"Error: Ollama returned {resp.status_code}", provider=self.name,
+                content=f"Error: Ollama returned {resp.status_code}",
+                provider=self.name,
+                stderr=resp.text[:4096],
             )
             self._journal_call(started, response, was_clamped, error=f"http {resp.status_code}")
             return response

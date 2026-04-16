@@ -251,6 +251,7 @@ class Provider(ABC):
             cost_usd=response.cost_usd,
             was_clamped=was_clamped,
             error=error,
+            stderr=response.stderr,
         )
 
     async def chat_json(

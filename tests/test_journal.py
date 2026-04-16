@@ -300,6 +300,57 @@ class TestJournalShape:
         # Duration should render as "—" for the still-running phase
         assert "—" in content
 
+    def test_stderr_renders_in_journal_for_failed_calls(
+        self, tmp_path: Path,
+    ) -> None:
+        """When a provider exits non-zero (or times out), the captured
+        stderr must appear in the journal so the next reproduction is
+        diagnosable from the file alone — no live re-run required."""
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="gemini-2.5-pro",
+            latency_ms=222000, was_clamped=False,
+            error="non-zero exit",
+            stderr="Error: API quota exceeded for project ABC123",
+        ))
+        content = j.write().read_text()
+        assert "## Provider errors" in content
+        assert "API quota exceeded for project ABC123" in content
+        assert "scan — gemini/gemini-2.5-pro (non-zero exit)" in content
+
+    def test_stderr_omitted_when_call_succeeded(self, tmp_path: Path) -> None:
+        """Successful calls don't get a stderr block — the journal stays
+        lean. Stderr is a debugging aid for failures, not a transcript."""
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=1000, was_clamped=False,
+            stderr="some warning the CLI emitted to stderr",
+        ))
+        content = j.write().read_text()
+        assert "## Provider errors" not in content
+        assert "some warning" not in content
+
+    def test_stderr_truncated_at_render_with_byte_count(
+        self, tmp_path: Path,
+    ) -> None:
+        """Long stderr is truncated in the rendered markdown so the
+        on-disk journal stays a sane size, but the truncation message
+        names the dropped byte count so a reader knows there's more."""
+        huge = "x" * 5000
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="claude", model="opus",
+            latency_ms=300, was_clamped=False,
+            error="non-zero exit",
+            stderr=huge,
+        ))
+        content = j.write().read_text()
+        assert "[truncated" in content
+        # Original payload is preserved on the in-memory record even
+        # though the rendered markdown is truncated.
+        assert j.provider_calls[0].stderr == huge
+
 
 class TestContextVarHooks:
     def test_record_provider_call_no_op_outside_cycle(self) -> None:
