@@ -29,8 +29,11 @@ import pytest
 from sentinel.budget_ctx import (
     is_budget_exhausted,
     remaining_seconds,
+    remaining_usd,
     set_cycle_deadline,
+    set_cycle_money_cap,
 )
+from sentinel.cli.work_cmd import _parse_budget
 from sentinel.providers.interface import (
     ChatResponse,
     Provider,
@@ -184,5 +187,108 @@ class TestProviderShortCircuitsWhenBudgetExhausted:
             assert provider.calls_made == 1
             assert response.content == "ok"
             assert response.is_error is False
+        finally:
+            set_cycle_deadline(None)
+
+
+class TestParseBudget:
+    """Money and time are independent dimensions. The user can specify
+    either, or both via comma-separation. Order doesn't matter."""
+
+    def test_money_only(self) -> None:
+        assert _parse_budget("$5") == (5.0, None)
+        assert _parse_budget("5") == (5.0, None)
+        assert _parse_budget("10.50") == (10.5, None)
+
+    def test_time_only(self) -> None:
+        assert _parse_budget("10m") == (None, 600)
+        assert _parse_budget("1h") == (None, 3600)
+        assert _parse_budget("30s") == (None, 30)
+
+    def test_combined_money_first(self) -> None:
+        assert _parse_budget("$5,10m") == (5.0, 600)
+
+    def test_combined_time_first(self) -> None:
+        assert _parse_budget("10m,$5") == (5.0, 600)
+
+    def test_combined_with_whitespace(self) -> None:
+        """Whitespace around the comma should be tolerated — common copy-paste."""
+        assert _parse_budget("10m , $5") == (5.0, 600)
+
+    def test_empty_returns_none(self) -> None:
+        assert _parse_budget(None) == (None, None)
+        assert _parse_budget("") == (None, None)
+
+    def test_garbage_raises(self) -> None:
+        import click as _click
+        with pytest.raises(_click.BadParameter):
+            _parse_budget("nonsense")
+        with pytest.raises(_click.BadParameter):
+            _parse_budget("10x")  # invalid time unit
+
+
+class TestMoneyCapExhaustion:
+    """Money cap is checked against the live journal's accumulated cost.
+    A run with no cost spent reports False; once cost ≥ cap, True."""
+
+    def test_no_cap_never_exhausted(self) -> None:
+        set_cycle_money_cap(None)
+        assert is_budget_exhausted() is False
+        assert remaining_usd() is None
+
+    def test_cap_with_no_journal_reports_full_remaining(self) -> None:
+        """Outside a cycle (no journal), cap is set but nothing is
+        spent — exhausted is False, remaining is the full cap."""
+        set_cycle_money_cap(10.0)
+        try:
+            assert is_budget_exhausted() is False
+            assert remaining_usd() == 10.0
+        finally:
+            set_cycle_money_cap(None)
+
+    def test_cap_exhausted_when_journal_total_meets_cap(
+        self, tmp_path,
+    ) -> None:
+        """With a live journal whose total_cost reaches the cap,
+        is_budget_exhausted returns True so the next provider call
+        short-circuits."""
+        from sentinel.journal import (
+            Journal,
+            ProviderCall,
+            set_current_journal,
+        )
+
+        j = Journal(
+            project_path=tmp_path, project_name="t", branch="main",
+            budget_str="$1",
+        )
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="claude", model="opus",
+            latency_ms=100, cost_usd=0.50,
+        ))
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="claude", model="opus",
+            latency_ms=100, cost_usd=0.55,
+        ))
+
+        set_current_journal(j)
+        set_cycle_money_cap(1.0)
+        try:
+            assert is_budget_exhausted() is True
+            assert remaining_usd() == 0.0
+        finally:
+            set_current_journal(None)
+            set_cycle_money_cap(None)
+
+    def test_time_and_money_caps_are_independent(self) -> None:
+        """Setting one dimension does not implicitly set the other.
+        A user who specifies only `--budget 5m` should not get any
+        money enforcement (only the daily limit applies, separately)."""
+        set_cycle_deadline(60)
+        set_cycle_money_cap(None)
+        try:
+            assert is_budget_exhausted() is False
+            assert remaining_seconds() is not None
+            assert remaining_usd() is None
         finally:
             set_cycle_deadline(None)
