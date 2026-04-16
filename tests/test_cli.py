@@ -99,6 +99,52 @@ class TestUnimplementedCommandsFailLoudly:
         assert "Not yet implemented" in result.output
 
 
+class TestShippingPreflight:
+    """The preflight that blocks `sentinel work` from starting if the
+    shipping prerequisites (gh installed + authenticated, origin
+    remote) aren't met. Codex flagged that the user otherwise hits a
+    cryptic error deep inside the ship step."""
+
+    def test_missing_gh_reports_install_command(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """No gh → return error mentioning brew install gh, no further
+        checks attempted (early return)."""
+        from sentinel.cli.work_cmd import _check_shipping_preflight
+
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        errors = _check_shipping_preflight(tmp_path)
+        assert errors
+        assert any("brew install gh" in e for e in errors)
+
+    def test_missing_origin_reports_git_remote_add(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """gh present + authenticated but no origin remote → error
+        mentions `git remote add`."""
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _check_shipping_preflight
+
+        # Real git repo in tmp_path with no remote
+        _sp.run(
+            ["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True,
+        )
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/gh")
+        # Stub gh auth status to succeed; only origin should fail
+        original_run = _sp.run
+
+        def fake_run(args, *a, **kw):  # noqa: ANN001, ANN202
+            if args[:3] == ["gh", "auth", "status"]:
+                return _sp.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+            return original_run(args, *a, **kw)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        errors = _check_shipping_preflight(tmp_path)
+        assert any("origin" in e for e in errors)
+
+
 class TestRemovedCommands:
     """These commands were removed — ensure they're no longer available."""
 

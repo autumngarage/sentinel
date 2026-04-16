@@ -379,6 +379,51 @@ class TestJournalShape:
         content = j.write().read_text()
         assert "## By role" not in content
 
+    def test_outer_role_must_be_restored_after_inner_role_returns(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: dogfood 2026-04-16 found that Researcher.domain_brief
+        sets role='researcher' and never restores. Every subsequent
+        Monitor lens eval in the same scope inherited 'researcher' as
+        the role tag, breaking the per-role cost breakdown.
+
+        The fix is in Monitor.assess (re-set role after the inner call)
+        but the contract is enforced here: a recorded call AFTER the
+        outer role re-sets must carry the outer role, not the inner."""
+        from sentinel.journal import (
+            current_role,
+            record_provider_call,
+            set_current_journal,
+            set_current_role,
+        )
+
+        j = _journal(tmp_path)
+        set_current_journal(j)
+        try:
+            # Outer role enters
+            set_current_role("monitor")
+            assert current_role() == "monitor"
+
+            # Inner role overwrites (mimics Researcher.domain_brief)
+            set_current_role("researcher")
+            record_provider_call(
+                provider="gemini", model="pro", latency_ms=100, cost_usd=0.01,
+            )
+
+            # OUTER must re-set after the inner call returns —
+            # otherwise the next call leaks the inner role.
+            set_current_role("monitor")
+            record_provider_call(
+                provider="gemini", model="flash", latency_ms=50, cost_usd=0.001,
+            )
+
+            # Both calls landed with their correct role attribution
+            assert j.provider_calls[0].role == "researcher"
+            assert j.provider_calls[1].role == "monitor"
+        finally:
+            set_current_journal(None)
+            set_current_role("")
+
     def test_role_jsonl_includes_role_when_tagged(
         self, tmp_path: Path,
     ) -> None:

@@ -589,6 +589,10 @@ class Monitor:
                 readme_excerpt=state.readme,
                 docs_excerpt=state.project_docs,
             )
+            # Researcher.domain_brief sets the role ContextVar to
+            # "researcher" — restore it to "monitor" so the lens evals
+            # that follow are attributed correctly in the journal.
+            set_current_role("monitor")
             state.domain_brief = brief.synthesis
             if brief.cost_usd > 0:
                 result.total_cost_usd += brief.cost_usd

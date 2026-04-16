@@ -100,6 +100,12 @@ class WorkItemRecord:
     # commands re-run against the new code). One of:
     # verified | not_verified | no_check_defined | None (not yet run).
     verification: str | None = None
+    # GitHub PR URL when Sentinel shipped a PR for this work item.
+    # Empty when no PR was opened (gates failed, ship aborted, etc.).
+    # Paired with `ship_status` so the journal explains why a non-empty
+    # URL might still be in a non-merged state.
+    pr_url: str = ""
+    ship_status: str = ""  # merged_armed | created | existed | failed | ""
 
 
 @dataclass
@@ -296,6 +302,10 @@ class Journal:
                     lines.append(
                         f"  - Verifier: {icon} {wi.verification}"
                     )
+                if wi.pr_url:
+                    lines.append(
+                        f"  - PR: [{wi.ship_status or 'opened'}] {wi.pr_url}"
+                    )
             lines.append("")
 
         if self.provider_calls:
@@ -421,7 +431,17 @@ def current_phase() -> str:
 def set_current_role(role: str) -> None:
     """Set the active role. Each Sentinel role sets this on entry to
     its method (Monitor.assess, Coder.execute, etc.) so provider calls
-    issued during that role's work carry the role tag in the journal."""
+    issued during that role's work carry the role tag in the journal.
+
+    **Nesting contract:** when a role calls *into* another role
+    (Monitor.assess → Researcher.domain_brief), the inner role
+    overwrites this ContextVar and never restores it. The OUTER role
+    is responsible for re-setting its own role after the inner call
+    returns — otherwise subsequent provider calls in the outer scope
+    get tagged with the inner role's name. Dogfood 2026-04-16 found
+    this exact bug: 9 monitor lens evals all tagged 'researcher'
+    because Monitor.assess didn't re-set after Researcher.domain_brief.
+    """
     _current_role.set(role)
 
 
