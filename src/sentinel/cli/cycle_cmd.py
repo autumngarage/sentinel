@@ -104,7 +104,7 @@ def _load_approved_proposals(project_path: Path) -> list[dict]:
 
 async def run_cycle(
     project_path: str | None = None,
-    max_items: int = 3,  # noqa: ARG001 — kept for CLI signature compat
+    max_items: int = 3,
     dry_run: bool = False,
 ) -> None:
     """Deprecated alias — delegates to `sentinel work`.
@@ -113,9 +113,27 @@ async def run_cycle(
     the legacy in-place Coder mode. That mode is gone (worktree-managed
     is the only path). Rather than re-implement the whole loop here,
     `cycle` now redirects through `work_cmd.run_work` — single code
-    path, no drift. The `--max-items` flag is silently ignored (work's
-    backlog iteration runs until budget exhaustion or completion).
+    path, no drift.
+
+    `work` iterates the full backlog until budget exhaustion or
+    completion; it has no equivalent of `--max-items`. If the caller
+    passed a non-default `max_items`, refuse explicitly rather than
+    silently ignoring the cap — pretending to cap at N items while
+    actually executing the whole backlog is the worst kind of API
+    surprise.
     """
+    if max_items != 3:
+        console.print(
+            f"[red]  `sentinel cycle --max-items {max_items}` is no longer "
+            f"supported.[/red]\n"
+            f"  The legacy item-cap was tied to the in-place Coder mode that "
+            f"has been removed.\n"
+            f"  Use `[bold]sentinel work --budget <time-or-money>[/bold]` "
+            f"to bound the cycle instead — `work` iterates the full "
+            f"backlog until the budget is hit.\n"
+        )
+        return
+
     from sentinel.cli.work_cmd import run_work
 
     console.print(
@@ -125,4 +143,3 @@ async def run_cycle(
     await run_work(
         project_path=project_path, dry_run=dry_run, auto=True,
     )
-    return

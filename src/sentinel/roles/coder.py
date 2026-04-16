@@ -80,8 +80,16 @@ def _git_status_snapshot(project_path: str) -> set[str]:
     # `--untracked-files=all` so newly-created files in newly-created
     # directories show as full paths, not just their containing dir
     # (the default `normal` mode collapses untracked dirs).
+    # `--no-renames` so each side of a rename gets its own entry
+    # (`D <old>` + `?? <new>`) — _commit_files stages both, capturing
+    # the deletion AND the new content. Without this, git's default
+    # rename detection would collapse to `R <old> -> <new>` and we'd
+    # ship the new file as a copy (the old path's deletion would not
+    # be staged).
     result = _run_git(
-        ["status", "--porcelain", "-z", "--untracked-files=all"], project_path,
+        ["status", "--porcelain", "-z",
+         "--untracked-files=all", "--no-renames"],
+        project_path,
     )
     if result.returncode != 0:
         # Don't silently swallow — a git failure here means the
@@ -98,20 +106,12 @@ def _git_status_snapshot(project_path: str) -> set[str]:
         )
         return set()
     paths: set[str] = set()
-    entries = result.stdout.split("\0")
-    skip_next = False
-    for entry in entries:
-        if skip_next:
-            skip_next = False
-            continue
+    for entry in result.stdout.split("\0"):
         if len(entry) < 4:
             continue
         # Format: "XY PATH" — status is exactly 2 chars, then a single
         # space, then the path. Slice from index 3 to drop the prefix.
-        status = entry[:2]
         path = entry[3:]
-        if status and status[0] in ("R", "C"):
-            skip_next = True  # the next entry is the rename's original
         if path.startswith(".sentinel/") or path.startswith(".claude/"):
             continue
         paths.add(path)

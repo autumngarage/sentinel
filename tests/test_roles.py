@@ -243,10 +243,12 @@ class TestGitStatusSnapshotPreservesFullPath:
             assert "principles/README.md.bak" in paths
             assert not any(p.startswith("rinciples/") for p in paths)
 
-    def test_skips_rename_original_entry(self) -> None:
-        """`-z` rename format is `R<sp>NEW\\0ORIG\\0` — the ORIG entry
-        is bare (no status prefix) and would be misparsed if not
-        skipped explicitly."""
+    def test_rename_returns_both_old_and_new_paths(self) -> None:
+        """We pass `--no-renames` to git status so each side of a
+        rename is its own entry: ` D old.py` + `?? new.py` (or
+        equivalent). _commit_files needs BOTH so the commit captures
+        the deletion AND the new file — without both, codex flagged
+        that renames would ship as copies."""
         import subprocess as _sp
 
         from sentinel.roles.coder import _git_status_snapshot
@@ -263,11 +265,11 @@ class TestGitStatusSnapshotPreservesFullPath:
             _sp.run(["git", "commit", "-m", "init", "-q"], cwd=tmpdir, check=True)
             _sp.run(["git", "mv", "old.py", "new.py"], cwd=tmpdir, check=True)
             paths = _git_status_snapshot(tmpdir)
-            # The new path should be in; the old path should not appear
-            # as a separate entry (it lives inside the rename's ORIG
-            # half, which we skip).
             assert "new.py" in paths
-            assert "old.py" not in paths
+            assert "old.py" in paths, (
+                "rename's old path must also be in the snapshot so "
+                "_commit_files stages the deletion alongside the new file"
+            )
 
 
 class TestFilesChangedIgnoresSentinelArtifacts:
