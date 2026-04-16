@@ -37,7 +37,11 @@ def run_routing_show(
         )
         return
 
-    journals = sorted(runs.glob("*.md"), reverse=True)[:limit]
+    # Sort by mtime so collision-suffixed journals (`...-2.md`) order
+    # correctly — see cost_cmd._print_by_role for the same fix and rationale.
+    journals = sorted(
+        runs.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True,
+    )[:limit]
     if not journals:
         console.print("[yellow]No run journals to inspect.[/yellow]")
         return

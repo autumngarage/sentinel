@@ -92,7 +92,14 @@ def _print_by_role(project: Path, cycles: int) -> None:
         )
         return
 
-    journals = sorted(runs.glob("*.md"), reverse=True)[:cycles]
+    # Sort by mtime descending — lexicographic sort would put
+    # collision-suffixed journals (`...-2.md`) BEFORE the unsuffixed
+    # original because '-' < '.', so `--cycles N` would pick the
+    # wrong N latest. mtime reflects actual write order regardless
+    # of filename collision behavior.
+    journals = sorted(
+        runs.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True,
+    )[:cycles]
     if not journals:
         console.print("[dim]No run journals to aggregate.[/dim]\n")
         return
