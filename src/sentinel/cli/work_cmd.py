@@ -326,6 +326,18 @@ async def _run_single_cycle(
             )
         return
 
+    # Pre-flight: clean up orphaned worktrees from prior crashed runs.
+    # `git worktree add` fails if the target path exists, so a SIGKILL
+    # partway through the prior cycle would block the next. One-line
+    # note when anything was actually pruned; silent otherwise.
+    from sentinel.worktree import cleanup_orphaned_worktrees
+    orphans = cleanup_orphaned_worktrees(project)
+    if orphans:
+        console.print(
+            f"  [dim]Pruned {orphans} orphaned worktree"
+            f"{'s' if orphans != 1 else ''} from prior crashed runs[/dim]"
+        )
+
     # Prune aged-out run journals before the cycle starts. Silent on
     # the common case (nothing expired), one-line note when something
     # was actually removed. Failing prune doesn't block work.
@@ -502,14 +514,16 @@ async def _run_single_cycle(
                 journal.exit_reason = "all_items_processed"
                 break
 
-            # Execute + review + verify
+            # Execute + review + verify + ship
             from sentinel.journal import WorkItemRecord
             wi_id = str(next_item.get("id", items_executed + 1))
             wi_title = next_item.get("title", "(untitled)")
             phase_label = f"execute:{wi_id}"
             set_current_phase("execute")
             journal.start_phase(phase_label)
-            success, verification_verdict = await _execute_and_review(
+            (
+                success, verification_verdict, ship_status, pr_url,
+            ) = await _execute_and_review(
                 next_item, items_executed + 1,
                 project, original_branch,
                 coder, reviewer, config,
@@ -517,11 +531,7 @@ async def _run_single_cycle(
             journal.end_phase(phase_label, status=success or "unknown")
 
             # Mirror the outcome into the work-items table so the journal
-            # shows what we ran, not just timings. _execute_and_review
-            # returns one of: "failed" (coder errored before review),
-            # "approved", "changes", "rejected". Map all four explicitly:
-            # the previous mapping collapsed changes/rejected into
-            # in_progress with no reviewer verdict, hiding real outcomes.
+            # shows what we ran, not just timings.
             wi_status, reviewer_verdict = {
                 "approved": ("succeeded", "approved"),
                 "changes": ("succeeded", "changes_requested"),
@@ -534,6 +544,8 @@ async def _run_single_cycle(
                 coder_status=wi_status,
                 reviewer_verdict=reviewer_verdict,
                 verification=verification_verdict,
+                pr_url=pr_url,
+                ship_status=ship_status,
             ))
 
             items_executed += 1
@@ -727,6 +739,44 @@ def _check_all_budgets(
     return True, ""
 
 
+def _build_pr_body(
+    work_item, action: dict, review, verification,  # noqa: ANN001
+) -> str:
+    """Compose the PR body — work item context, lens that flagged it,
+    reviewer verdict, verification results. Goes through --body-file so
+    length is unconstrained.
+    """
+    lines = [
+        f"## What\n\n{work_item.description or work_item.title}\n",
+        f"## Why\n\n{action.get('why', '(no rationale recorded)')}\n",
+        f"**Lens:** `{action.get('lens', '(none)')}`",
+        f"**Type:** {work_item.type} | **Priority:** {work_item.priority}",
+        "",
+        "## Reviewer verdict",
+        "",
+        f"- **Verdict:** {review.verdict}",
+        f"- **Summary:** {review.summary or '(no summary)'}",
+    ]
+    if review.blocking_issues:
+        lines += ["", "**Blocking issues:**"]
+        lines += [f"- {issue}" for issue in review.blocking_issues]
+    lines += [
+        "",
+        "## Verification (project's own checks)",
+        "",
+        f"- **Overall:** {verification.overall}",
+    ]
+    for c in verification.checks:
+        lines.append(f"- `{c.name}`: {c.verdict} ({c.duration_s:.1f}s)")
+    lines += [
+        "",
+        "---",
+        "",
+        f"_Shipped by sentinel for work item `{work_item.id}`._",
+    ]
+    return "\n".join(lines)
+
+
 async def _execute_and_review(
     action: dict,
     index: int,
@@ -735,109 +785,163 @@ async def _execute_and_review(
     coder: Coder,
     reviewer: Reviewer,
     config: SentinelConfig,
-) -> tuple[str, str | None]:
-    """Execute one work item, review it, and verify against project checks.
+) -> tuple[str, str | None, str, str]:
+    """Execute one work item in its own worktree, review it, verify
+    against project checks, and ship a PR if both gates pass.
 
-    Returns (verdict, verification_overall) where:
-      - verdict is one of 'approved', 'changes', 'rejected', 'failed'
-      - verification_overall is one of 'verified', 'not_verified',
-        'no_check_defined', or None when verification was skipped (e.g.
-        coder failed before producing a diff)
+    Returns (verdict, verification_overall, ship_status, pr_url) where:
+      - verdict: 'approved' | 'changes' | 'rejected' | 'failed'
+      - verification_overall: 'verified' | 'not_verified' |
+        'no_check_defined' | None
+      - ship_status: '' (not attempted), 'merged_armed', 'created',
+        'existed', 'failed'
+      - pr_url: GitHub URL when shipped, '' otherwise
+
+    The user's main checkout is NEVER touched — all work happens in a
+    `.sentinel/worktrees/wi-<id>` worktree that's cleaned up on exit
+    (success, exception, or interrupt).
     """
+    from sentinel.git_ops import slug
+    from sentinel.pr import ship_pr
+    from sentinel.verify import persist_verification, verify_work_item
+    from sentinel.worktree import worktree_for
+
     work_item = _action_to_work_item(action, index)
     console.print(f"[bold cyan]→ Executing[/bold cyan] {work_item.title}")
     console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
 
-    # Reset to original branch before each item. `git checkout` fails
-    # silently when the working tree is dirty, which used to cause each
-    # item's edits to stack on the previous — sigint dogfood showed 3
-    # "successful" runs commingling into one diff. Reset first, then
-    # checkout — the Coder commits its own work, so anything still in
-    # the tree here is a failed attempt we shouldn't carry forward.
-    if not _reset_and_checkout(str(project), original_branch):
+    branch = f"sentinel/wi-{work_item.id}-{slug(work_item.title)}"
+    wi_slug = f"wi-{work_item.id}"
+
+    async with worktree_for(
+        project, branch=branch, base=original_branch, slug=wi_slug,
+    ) as ctx:
+        t0 = time.time()
+        exec_result = await coder.execute(
+            work_item, str(project),
+            working_directory=str(ctx.path),
+            artifacts_directory=str(project),
+            branch=ctx.branch,
+        )
+
+        if exec_result.cost_usd > 0:
+            record_spend(
+                project, exec_result.cost_usd, "work-execute",
+                f"item={work_item.title[:40]}",
+            )
+
+        elapsed = time.time() - t0
+        if exec_result.status == "failed":
+            console.print(f"  [red]✗ Execute failed:[/red] {exec_result.error}")
+            return "failed", None, "", ""
+
         console.print(
-            "  [red]✗ Cannot return to original branch — aborting item.[/red]"
-        )
-        return "failed", None
-
-    t0 = time.time()
-    exec_result = await coder.execute(work_item, str(project))
-
-    if exec_result.cost_usd > 0:
-        record_spend(
-            project, exec_result.cost_usd, "work-execute",
-            f"item={work_item.title[:40]}",
+            f"  [green]✓ Coded[/green] in {elapsed:.0f}s — "
+            f"{len(exec_result.files_changed)} files, "
+            f"tests: {'pass' if exec_result.tests_passing else 'FAIL'}"
         )
 
-    elapsed = time.time() - t0
-    if exec_result.status == "failed":
-        console.print(f"  [red]✗ Execute failed:[/red] {exec_result.error}")
-        return "failed", None
-
-    console.print(
-        f"  [green]✓ Coded[/green] in {elapsed:.0f}s — "
-        f"{len(exec_result.files_changed)} files, "
-        f"tests: {'pass' if exec_result.tests_passing else 'FAIL'}"
-    )
-
-    # Review
-    console.print("  [dim]reviewing...[/dim]")
-    review = await reviewer.review(work_item, exec_result, str(project))
-    if review.cost_usd > 0:
-        record_spend(
-            project, review.cost_usd, "work-review",
-            f"item={work_item.title[:40]}",
+        # Review against the worktree's diff
+        console.print("  [dim]reviewing...[/dim]")
+        review = await reviewer.review(
+            work_item, exec_result, str(project),
+            working_directory=str(ctx.path),
         )
+        if review.cost_usd > 0:
+            record_spend(
+                project, review.cost_usd, "work-review",
+                f"item={work_item.title[:40]}",
+            )
 
-    verdict_color = {
-        "approved": "green",
-        "changes-requested": "yellow",
-        "rejected": "red",
-    }[review.verdict]
-    console.print(
-        f"  [{verdict_color}]Review: {review.verdict}[/{verdict_color}] "
-        f"[dim]→ branch: {exec_result.branch}[/dim]"
-    )
-    if review.blocking_issues:
-        for issue in review.blocking_issues[:2]:
-            console.print(f"    • {issue}")
-    console.print()
-
-    # Verify against the project's own checks. Independent signal from
-    # the reviewer LLM — proves (or disproves) that the project's
-    # invariants still hold after the diff. Verdict is recorded
-    # regardless of reviewer outcome; downstream tooling decides what
-    # to do with not_verified items.
-    from sentinel.verify import persist_verification, verify_work_item
-    verification = verify_work_item(
-        project_path=project,
-        work_item_id=str(work_item.id),
-        work_item_title=work_item.title,
-        branch=exec_result.branch,
-    )
-    try:
-        persist_verification(project, verification)
-    except OSError as e:
+        verdict_color = {
+            "approved": "green",
+            "changes-requested": "yellow",
+            "rejected": "red",
+        }[review.verdict]
         console.print(
-            f"  [yellow]Could not persist verification: {e}[/yellow]"
+            f"  [{verdict_color}]Review: {review.verdict}[/{verdict_color}] "
+            f"[dim]→ branch: {ctx.branch}[/dim]"
         )
-    verifier_icon = {
-        "verified": "[green]✅[/green]",
-        "not_verified": "[red]❌[/red]",
-        "no_check_defined": "[dim]—[/dim]",
-    }.get(verification.overall, "?")
-    console.print(
-        f"  Verifier: {verifier_icon} {verification.overall} "
-        f"[dim]({len([c for c in verification.checks if c.verdict == 'pass'])}"
-        f"/{len(verification.checks)} checks passed)[/dim]"
-    )
-    console.print()
+        if review.blocking_issues:
+            for issue in review.blocking_issues[:2]:
+                console.print(f"    • {issue}")
+        console.print()
+
+        # Verify in the worktree (where the diff lives), persist to
+        # main project (where artifacts survive).
+        verification = verify_work_item(
+            project_path=project,
+            work_item_id=str(work_item.id),
+            work_item_title=work_item.title,
+            branch=ctx.branch,
+            working_directory=ctx.path,
+        )
+        try:
+            persist_verification(project, verification)
+        except OSError as e:
+            console.print(
+                f"  [yellow]Could not persist verification: {e}[/yellow]"
+            )
+        verifier_icon = {
+            "verified": "[green]✅[/green]",
+            "not_verified": "[red]❌[/red]",
+            "no_check_defined": "[dim]—[/dim]",
+        }.get(verification.overall, "?")
+        console.print(
+            f"  Verifier: {verifier_icon} {verification.overall} "
+            f"[dim]({len([c for c in verification.checks if c.verdict == 'pass'])}"
+            f"/{len(verification.checks)} checks passed)[/dim]"
+        )
+        console.print()
+
+        # Ship gate: BOTH reviewer.approved AND verifier.verified
+        # required. `no_check_defined` is NOT tested PR quality and
+        # must not pass — codex-flagged risk.
+        ship_status = ""
+        pr_url = ""
+        ship_ready = (
+            review.verdict == "approved"
+            and verification.overall == "verified"
+        )
+        if ship_ready and exec_result.commit_sha:
+            ship = await ship_pr(
+                worktree_path=ctx.path,
+                project_path=project,
+                branch=ctx.branch,
+                base=ctx.base,
+                head_sha=exec_result.commit_sha,
+                title=f"sentinel: {work_item.title[:72]}",
+                body_md=_build_pr_body(
+                    work_item, action, review, verification,
+                ),
+            )
+            ship_status = ship.status
+            pr_url = ship.pr_url
+            if ship.status in ("merged_armed", "created", "existed"):
+                console.print(
+                    f"  [green]→ PR ({ship.status}):[/green] {ship.pr_url}"
+                )
+                if ship.error:
+                    console.print(f"    [yellow]{ship.error}[/yellow]")
+            else:
+                console.print(
+                    f"  [red]✗ Ship failed:[/red] {ship.error}"
+                )
+        elif review.verdict == "approved" and verification.overall != "verified":
+            # Approved by reviewer but verification didn't pass — branch
+            # stays for human inspection; no PR opened.
+            console.print(
+                f"  [yellow]Approved by reviewer but verification "
+                f"is {verification.overall} — branch left at "
+                f"{ctx.branch}, no PR opened.[/yellow]"
+            )
+        console.print()
 
     if review.verdict == "approved":
-        return "approved", verification.overall
+        return "approved", verification.overall, ship_status, pr_url
     if review.verdict == "changes-requested":
-        return "changes", verification.overall
-    return "rejected", verification.overall
+        return "changes", verification.overall, ship_status, pr_url
+    return "rejected", verification.overall, ship_status, pr_url
 
 
 async def _run_loop(

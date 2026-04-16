@@ -100,6 +100,12 @@ class WorkItemRecord:
     # commands re-run against the new code). One of:
     # verified | not_verified | no_check_defined | None (not yet run).
     verification: str | None = None
+    # GitHub PR URL when Sentinel shipped a PR for this work item.
+    # Empty when no PR was opened (gates failed, ship aborted, etc.).
+    # Paired with `ship_status` so the journal explains why a non-empty
+    # URL might still be in a non-merged state.
+    pr_url: str = ""
+    ship_status: str = ""  # merged_armed | created | existed | failed | ""
 
 
 @dataclass
@@ -295,6 +301,10 @@ class Journal:
                     }.get(wi.verification, "?")
                     lines.append(
                         f"  - Verifier: {icon} {wi.verification}"
+                    )
+                if wi.pr_url:
+                    lines.append(
+                        f"  - PR: [{wi.ship_status or 'opened'}] {wi.pr_url}"
                     )
             lines.append("")
 
