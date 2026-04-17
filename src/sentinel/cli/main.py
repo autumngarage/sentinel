@@ -158,9 +158,9 @@ def cycle(max_items: int, dry_run: bool) -> None:
          "across recent cycles instead of by date.",
 )
 @click.option(
-    "--cycles", "-n", type=int, default=20,
+    "--cycles", "-n", type=click.IntRange(min=1), default=20,
     help="How many recent cycles to aggregate when --by-role is set "
-         "(default 20).",
+         "(default 20). Must be >= 1.",
 )
 def cost(by_role: bool, cycles: int) -> None:
     """Show spend history and budget status."""
@@ -176,8 +176,8 @@ def routing() -> None:
 
 @routing.command("show")
 @click.option(
-    "--limit", "-n", type=int, default=10,
-    help="How many recent cycles to scan (default 10).",
+    "--limit", "-n", type=click.IntRange(min=1), default=10,
+    help="How many recent cycles to scan (default 10). Must be >= 1.",
 )
 def routing_show(limit: int) -> None:
     """Show routing overrides from recent run journals."""

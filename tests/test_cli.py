@@ -158,6 +158,19 @@ class TestCostByRole:
         assert result.exit_code == 0
         assert "No run journals" in result.output
 
+    def test_negative_cycles_rejected_by_click(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Codex flagged: a negative `--cycles` would slice nothing
+        and silently report empty without rejecting the input. The
+        IntRange constraint refuses at the CLI layer."""
+        self._config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role", "-n", "-1"])
+        assert result.exit_code != 0
+        assert "Invalid value" in result.output or "is not in" in result.output
+
     def test_selects_recent_cycles_by_mtime_not_filename(
         self, tmp_path, monkeypatch,
     ) -> None:
