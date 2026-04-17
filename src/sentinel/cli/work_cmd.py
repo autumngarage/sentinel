@@ -464,6 +464,9 @@ async def _run_single_cycle(
                     f"  [green]✓[/green] Health: {scan_result.overall_score}/100 "
                     f"(${scan_result.total_cost_usd:.4f})\n"
                 )
+                _print_cycle_spend(
+                    project, config, cycle_spend_start, money_budget,
+                )
 
             # --- 4. Plan if backlog stale ---
             if _backlog_stale(project):
@@ -492,6 +495,9 @@ async def _run_single_cycle(
                     f"{len(expansions)} expansion proposals"
                 )
                 journal.end_phase("plan")
+                _print_cycle_spend(
+                    project, config, cycle_spend_start, money_budget,
+                )
                 if proposals:
                     console.print(
                         "  [dim]  New proposals in .sentinel/proposals/ — "
@@ -555,6 +561,9 @@ async def _run_single_cycle(
                 coder, reviewer, config,
             )
             journal.end_phase(phase_label, status=success or "unknown")
+            _print_cycle_spend(
+                project, config, cycle_spend_start, money_budget,
+            )
 
             # Mirror the outcome into the work-items table so the journal
             # shows what we ran, not just timings.
@@ -635,15 +644,23 @@ async def _run_single_cycle(
             )
         )
     else:
+        cycle_spend_line = _format_cycle_spend_line(
+            budget_now.today_spent_usd, cycle_spend_start, money_budget,
+        )
+        panel_body = (
+            f"Items executed: {items_executed}\n"
+            f"  • Approved: {items_approved}\n"
+            f"  • Rejected: {items_rejected}\n"
+            f"  • Failed: {items_failed}\n\n"
+            f"Time: {int(elapsed)}s\n"
+            f"Spend today: ${budget_now.today_spent_usd:.4f} / "
+            f"${budget_now.daily_limit_usd:.2f}"
+        )
+        if cycle_spend_line:
+            panel_body += f"\n{cycle_spend_line}"
         console.print(
             Panel(
-                f"Items executed: {items_executed}\n"
-                f"  • Approved: {items_approved}\n"
-                f"  • Rejected: {items_rejected}\n"
-                f"  • Failed: {items_failed}\n\n"
-                f"Time: {int(elapsed)}s\n"
-                f"Spend today: ${budget_now.today_spent_usd:.4f} / "
-                f"${budget_now.daily_limit_usd:.2f}",
+                panel_body,
                 title="[bold]Done[/bold]",
                 border_style="cyan",
             )
@@ -732,6 +749,49 @@ def _suggest_next_action(  # noqa: ANN001
             "rescued lens evaluations"
         )
     return ""
+
+
+def _format_cycle_spend_line(
+    today_spent_usd: float,
+    cycle_spend_start: float,
+    money_budget: float | None,
+) -> str | None:
+    """Return a dim per-phase spend hint, or None if no money cap is set.
+
+    Format: "Cycle spend: $X.XXXX / $Y.YY"
+
+    Only meaningful (and only shown) when the user passed a money cap via
+    --budget $X. Without a cap there's no reference point and the line
+    would just add noise.
+    """
+    if money_budget is None:
+        return None
+    cycle_spent = today_spent_usd - cycle_spend_start
+    return f"Cycle spend: ${cycle_spent:.4f} / ${money_budget:.2f}"
+
+
+def _print_cycle_spend(
+    project: Path,
+    config: SentinelConfig,
+    cycle_spend_start: float,
+    money_budget: float | None,
+) -> None:
+    """Print a dim cycle spend hint if a money cap is active.
+
+    Reads live spend from the budget journal so the number reflects any
+    spend that occurred during the phase that just completed. No-ops when
+    no money cap is set — avoids clutter for time-only or uncapped runs.
+    """
+    if money_budget is None:
+        return
+    status = check_budget(
+        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+    )
+    line = _format_cycle_spend_line(
+        status.today_spent_usd, cycle_spend_start, money_budget,
+    )
+    if line:
+        console.print(f"  [dim]{line}[/dim]")
 
 
 def _bucket_outcome(success: str | None) -> str:

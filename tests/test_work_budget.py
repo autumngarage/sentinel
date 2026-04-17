@@ -136,3 +136,41 @@ def test_no_money_budget_means_no_per_run_gate(monkeypatch, tmp_path):
         time_budget_sec=None,
     )
     assert ok
+
+
+# --- _format_cycle_spend_line ---
+
+def test_format_cycle_spend_line_with_money_cap():
+    """When a money cap is set, returns a formatted spend vs cap string."""
+    line = work_cmd._format_cycle_spend_line(
+        today_spent_usd=2.87,
+        cycle_spend_start=2.00,
+        money_budget=5.00,
+    )
+    assert line is not None
+    assert "Cycle spend:" in line
+    # Cycle delta is 2.87 - 2.00 = 0.87
+    assert "$0.8700" in line
+    assert "$5.00" in line
+
+
+def test_format_cycle_spend_line_without_money_cap():
+    """When no money cap is set, returns None — no line should be printed."""
+    line = work_cmd._format_cycle_spend_line(
+        today_spent_usd=2.87,
+        cycle_spend_start=0.00,
+        money_budget=None,
+    )
+    assert line is None
+
+
+def test_format_cycle_spend_line_zero_spend():
+    """At cycle start with zero spend the line still formats correctly."""
+    line = work_cmd._format_cycle_spend_line(
+        today_spent_usd=1.50,
+        cycle_spend_start=1.50,
+        money_budget=5.00,
+    )
+    assert line is not None
+    assert "$0.0000" in line
+    assert "$5.00" in line
