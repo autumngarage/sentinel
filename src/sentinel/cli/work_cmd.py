@@ -400,6 +400,7 @@ async def _run_single_cycle(
 
     items_executed = 0
     items_approved = 0
+    items_rejected = 0
     items_failed = 0
 
     try:
@@ -574,9 +575,12 @@ async def _run_single_cycle(
             ))
 
             items_executed += 1
-            if success == "approved":
+            bucket = _bucket_outcome(success)
+            if bucket == "approved":
                 items_approved += 1
-            elif success == "failed":
+            elif bucket == "rejected":
+                items_rejected += 1
+            else:
                 items_failed += 1
         # Loop exits only via break paths above (each sets a specific
         # exit_reason). Falling out the bottom of `while True` would mean
@@ -635,6 +639,7 @@ async def _run_single_cycle(
             Panel(
                 f"Items executed: {items_executed}\n"
                 f"  • Approved: {items_approved}\n"
+                f"  • Rejected: {items_rejected}\n"
                 f"  • Failed: {items_failed}\n\n"
                 f"Time: {int(elapsed)}s\n"
                 f"Spend today: ${budget_now.today_spent_usd:.4f} / "
@@ -727,6 +732,27 @@ def _suggest_next_action(  # noqa: ANN001
             "rescued lens evaluations"
         )
     return ""
+
+
+def _bucket_outcome(success: str | None) -> str:
+    """Map _execute_and_review's `success` token to a summary bucket.
+
+    Three buckets, exhaustive: an executed item lands in exactly one.
+    - `approved` — reviewer approved, work shipped (or attempted to)
+    - `rejected` — reviewer surfaced fixable issues; iteration loop ran
+      to completion without earning approval (`changes` or `rejected`)
+    - `failed`  — tooling broke (`failed`), or any unexpected token
+
+    Distinguishing rejected from failed matters for operator signal: a
+    rejection means coder quality / scope was the gate, a failure means
+    the harness itself broke. Pre-fix the cycle summary lumped them so
+    rejections silently disappeared from the totals.
+    """
+    if success == "approved":
+        return "approved"
+    if success in ("changes", "rejected"):
+        return "rejected"
+    return "failed"
 
 
 def _check_all_budgets(
