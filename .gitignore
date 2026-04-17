@@ -35,6 +35,10 @@ build/
 .next/
 out/
 
+# Build-time artifact written by hatch-vcs — version derived from git
+# at build time. Never hand-edited, must not be committed.
+src/sentinel/_version.py
+
 # uv
 uv.lock
 
