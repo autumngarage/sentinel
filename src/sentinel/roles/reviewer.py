@@ -29,6 +29,14 @@ class ReviewResult:
     non_blocking_observations: list[str] = field(default_factory=list)
     acceptance_criteria_met: dict[str, bool] = field(default_factory=dict)
     cost_usd: float = 0.0
+    # `infrastructure_failure` distinguishes "the reviewer LLM could
+    # not produce a structured verdict" (the review itself broke — no
+    # signal about the code) from a real "rejected" verdict (the code
+    # has real findings). Without this distinction the iteration loop
+    # would treat "reviewer crashed" as "coder produced bad work" and
+    # launch another expensive coder pass against a nonexistent
+    # finding. Codex review of PR #63 caught this.
+    infrastructure_failure: bool = False
 
 
 REVIEW_SCHEMA = {
@@ -288,6 +296,7 @@ class Reviewer:
             result.verdict = "rejected"
             result.summary = f"Review failed: {response.content[:200]}"
             result.blocking_issues = ["Reviewer could not produce a structured verdict"]
+            result.infrastructure_failure = True
             _write_review_transcript(
                 project_path, work_item, execution, result,
                 diff=diff, raw_response=response.content,

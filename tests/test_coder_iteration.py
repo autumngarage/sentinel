@@ -66,7 +66,10 @@ def _make_exec_result(*, status: str = "partial", cost: float = 0.1) -> Executio
 
 
 def _review(
-    verdict: str, issues: list[str] | None = None, cost: float = 0.05,
+    verdict: str,
+    issues: list[str] | None = None,
+    cost: float = 0.05,
+    infrastructure_failure: bool = False,
 ) -> ReviewResult:
     return ReviewResult(
         work_item_id="t1",
@@ -74,6 +77,7 @@ def _review(
         summary="",
         blocking_issues=list(issues or []),
         cost_usd=cost,
+        infrastructure_failure=infrastructure_failure,
     )
 
 
@@ -86,6 +90,22 @@ class TestIssueSetNormalization:
 
     def test_drops_empty_entries(self) -> None:
         assert _issue_set(["a", "", "  "]) == _issue_set(["a"])
+
+    def test_none_returns_empty(self) -> None:
+        """Provider JSON can return null for `blocking_issues`. Codex
+        review of PR #63 flagged that strict iteration would crash."""
+        assert _issue_set(None) == frozenset()
+
+    def test_non_iterable_returns_empty(self) -> None:
+        assert _issue_set(42) == frozenset()
+
+    def test_drops_non_string_entries(self) -> None:
+        """A malformed reviewer response might include nulls or
+        nested objects inside the `blocking_issues` array. Skip
+        those — keep the string findings."""
+        assert _issue_set(["real issue", None, 42, {"nested": 1}]) == frozenset(
+            ["real issue"],
+        )
 
 
 class TestIterateCoderReviewer:
@@ -255,6 +275,73 @@ class TestIterateCoderReviewer:
             project=tmp_path, ctx=ctx,
         )
         assert iters == 2  # initial + one revision, then stuck
+
+    @pytest.mark.asyncio
+    async def test_reviewer_infrastructure_failure_at_entry_skips_loop(
+        self, ctx: FakeCtx, tmp_path: Path,
+    ) -> None:
+        """If the initial review was a reviewer-side failure (couldn't
+        produce a structured verdict), we must NOT iterate — there are
+        no real findings for the coder to address, and a coder pass
+        against a synthetic "rejected" would just burn money. Codex
+        caught this on PR #63."""
+        work_item = _make_work_item()
+        initial_exec = _make_exec_result()
+        initial_review = _review(
+            "rejected",
+            ["Reviewer could not produce a structured verdict"],
+            infrastructure_failure=True,
+        )
+
+        coder = MagicMock(spec=Coder)
+        coder.execute = AsyncMock()
+        reviewer = MagicMock()
+        reviewer.review = AsyncMock()
+
+        exec_r, review, iters = await _iterate_coder_reviewer(
+            work_item=work_item,
+            exec_result=initial_exec,
+            review=initial_review,
+            coder=coder, reviewer=reviewer,
+            project=tmp_path, ctx=ctx,
+        )
+        assert iters == 1
+        assert coder.execute.call_count == 0
+        assert reviewer.review.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_reviewer_infrastructure_failure_mid_loop_stops(
+        self, ctx: FakeCtx, tmp_path: Path,
+    ) -> None:
+        """Iteration may also hit a reviewer failure AFTER a successful
+        first review. Same rule — stop rather than burn another coder
+        pass against a non-verdict."""
+        work_item = _make_work_item()
+        initial_exec = _make_exec_result()
+        initial_review = _review("rejected", ["issue A"])
+
+        coder = MagicMock(spec=Coder)
+        coder.execute = AsyncMock(return_value=_make_exec_result())
+
+        reviewer = MagicMock()
+        reviewer.review = AsyncMock(side_effect=[
+            _review(
+                "rejected",
+                ["Reviewer could not produce a structured verdict"],
+                infrastructure_failure=True,
+            ),
+        ])
+
+        exec_r, review, iters = await _iterate_coder_reviewer(
+            work_item=work_item,
+            exec_result=initial_exec,
+            review=initial_review,
+            coder=coder, reviewer=reviewer,
+            project=tmp_path, ctx=ctx,
+        )
+        assert iters == 2  # we did one revise+review, then stopped
+        assert coder.execute.call_count == 1
+        assert reviewer.review.call_count == 1
 
     @pytest.mark.asyncio
     async def test_coder_failure_breaks_loop(

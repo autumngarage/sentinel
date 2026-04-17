@@ -870,14 +870,32 @@ def _build_pr_body(
 MAX_CODER_ITERATIONS = 3
 
 
-def _issue_set(issues: list[str]) -> frozenset[str]:
+def _issue_set(issues: object) -> frozenset[str]:
     """Normalize reviewer blocking issues for no-progress comparison.
 
     Two reviews reporting the same findings in different order — or
     with incidental whitespace drift — are still the same findings for
     the purposes of deciding whether to keep iterating.
+
+    Defensive to malformed reviewer output: provider JSON can drift
+    (None instead of a list, non-string entries, nested nulls). Codex
+    review of PR #63 flagged that strict typing here would crash
+    iteration on untrusted LLM output. Accept anything iterable, keep
+    only stripped non-empty strings.
     """
-    return frozenset(i.strip() for i in issues if i.strip())
+    if not issues:
+        return frozenset()
+    try:
+        iterator = iter(issues)  # type: ignore[call-overload]
+    except TypeError:
+        return frozenset()
+    out: set[str] = set()
+    for item in iterator:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                out.add(stripped)
+    return frozenset(out)
 
 
 async def _iterate_coder_reviewer(
@@ -912,6 +930,18 @@ async def _iterate_coder_reviewer(
     """
     iterations = 1
     prior_issues: frozenset[str] | None = None
+
+    # If the initial review was a reviewer-infrastructure failure (not
+    # a real verdict on the code), do not iterate — there are no
+    # findings for the coder to address. Codex review of PR #63 caught
+    # this: otherwise a "reviewer crashed" outcome would trigger
+    # expensive coder passes against nonexistent feedback.
+    if getattr(review, "infrastructure_failure", False):
+        console.print(
+            "  [yellow]Reviewer infrastructure failure — not "
+            "iterating[/yellow]"
+        )
+        return exec_result, review, iterations
 
     while (
         review.verdict != "approved"
@@ -979,6 +1009,16 @@ async def _iterate_coder_reviewer(
         if review.verdict != "approved" and review.blocking_issues:
             for issue in review.blocking_issues[:2]:
                 console.print(f"    • {issue}")
+
+        # Mid-loop reviewer infrastructure failure — same rule as at
+        # entry: stop iterating, don't burn another coder pass against
+        # a non-verdict.
+        if getattr(review, "infrastructure_failure", False):
+            console.print(
+                "  [yellow]Reviewer infrastructure failure mid-loop — "
+                "stopping iteration[/yellow]"
+            )
+            break
 
     return exec_result, review, iterations
 
