@@ -17,7 +17,16 @@ Each step is powered by a configurable LLM provider (CLI-based, no API keys stor
 Goals are derived from CLAUDE.md, README, and GitHub issues — not stored separately.
 """
 
-__version__ = "0.2.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    __version__ = _pkg_version("sentinel")
+except PackageNotFoundError:
+    # Running from an uninstalled source checkout (rare — direct `python
+    # -m` against src/). Fall back to a sentinel so --version still works
+    # rather than crashing on import.
+    __version__ = "0.0.0+unknown"
 
 # Silence the sentinel logger by default — errors are captured in
 # ProjectState.errors / ScanResult.error and surfaced via the CLI.
