@@ -31,7 +31,7 @@ Each phase is powered by a role — an LLM configured for one job. You assign a 
 
 | Role | Default | Why |
 |---|---|---|
-| **Monitor** | Ollama (local) | Runs often — should be free |
+| **Monitor** | Gemini Flash | Runs often — Flash is fast and free on the free tier |
 | **Researcher** | Gemini CLI | Native web search, cheap |
 | **Planner** | Claude CLI | Best judgment |
 | **Coder** | Claude Code | Full agentic loop |
@@ -90,6 +90,8 @@ Supporting commands:
 
 ```bash
 sentinel cost                   # spend history
+sentinel cost --by-role         # spend broken down by role
+sentinel cost --by-role -n 10   # by-role view, last N cycles only
 sentinel providers              # provider detection + health
 ```
 
@@ -103,8 +105,8 @@ name = "my-project"
 path = "/Users/you/Repos/my-project"
 
 [roles.monitor]
-provider = "local"              # Ollama, runs on your machine
-model = "qwen2.5-coder:14b"
+provider = "gemini"
+model = "gemini-2.5-flash"      # fast + free-tier eligible; runs every cycle
 
 [roles.researcher]
 provider = "gemini"
@@ -125,6 +127,13 @@ model = "gemini-2.5-pro"
 [budget]
 daily_limit_usd = 15.00
 ```
+
+Optional sections — see `src/sentinel/config/schema.py` for the full list:
+
+- `[scan]` — `max_lenses`, `evaluate_per_lens`, `provider_timeout_sec`
+- `[coder]` — `max_turns`
+- `[local]` — `ollama_endpoint` for non-default Ollama hosts
+- `[retention]` — `runs_days` for how long cycle logs stick around
 
 Project context — what it is, current stage, what matters most right now — lives in your existing `README.md`, `CLAUDE.md`, `AGENTS.md`, and any strategic docs (architecture, vision, principles). Sentinel reads them every scan.
 
