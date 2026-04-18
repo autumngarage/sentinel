@@ -301,8 +301,18 @@ async def _run_single_cycle(
 
     # --- 1. Initialize if needed ---
     if not (project / ".sentinel" / "config.toml").exists():
+        # Doctrine 0002 — `sentinel init` is the canonical first-run
+        # entry. `sentinel work` still auto-inits for backward compat,
+        # but prints a visible warning so users discover the explicit
+        # command. No hard-fail: preserving the running flow matters
+        # more than enforcing discoverability at this exact moment.
+        console.print(
+            "[yellow]WARNING: .sentinel/config.toml not found; running "
+            "implicit init with defaults. Run [bold]sentinel init[/bold] "
+            "next time for interactive setup.[/yellow]\n",
+        )
         console.print("[bold cyan]→ Initializing[/bold cyan]\n")
-        run_init(str(project))
+        run_init(str(project), implicit=True)
         console.print()
 
     config = _load_config(project)
