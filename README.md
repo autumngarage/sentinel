@@ -91,7 +91,7 @@ Supporting commands:
 ```bash
 sentinel cost                   # spend history
 sentinel cost --by-role         # spend broken down by role
-sentinel cost -n 10             # last N cycles only
+sentinel cost --by-role -n 10   # by-role view, last N cycles only
 sentinel providers              # provider detection + health
 ```
 
