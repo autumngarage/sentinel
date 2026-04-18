@@ -61,7 +61,11 @@ ROLE_DEFAULTS: dict[RoleName, RoleDefault] = {
     RoleName.RESEARCHER: RoleDefault(provider=ProviderName.GEMINI, model="gemini-2.5-pro"),
     RoleName.PLANNER: RoleDefault(provider=ProviderName.CLAUDE, model="claude-opus-4-6"),
     RoleName.CODER: RoleDefault(provider=ProviderName.CLAUDE, model="claude-sonnet-4-6"),
-    RoleName.REVIEWER: RoleDefault(provider=ProviderName.GEMINI, model="gemini-2.5-pro"),
+    # Reviewer MUST be a different provider than Coder (Doctrine 0002 —
+    # cross-provider review is the invariant, not just cross-model).
+    # Defaulting to codex/OpenAI gives genuine independence; falls back
+    # to gemini → local → same-as-coder-with-warning when unavailable.
+    RoleName.REVIEWER: RoleDefault(provider=ProviderName.OPENAI, model="gpt-5.4"),
 }
 
 
