@@ -223,6 +223,7 @@ def run_init(
 
     # Write files
     _write_config(project, project_type, role_assignments, daily_budget)
+    _write_sentinel_gitignore(project)
     _install_claude_templates(project)
     _ensure_gitignore_entries(project)
 
@@ -340,6 +341,42 @@ def _write_config(
     }
     config_path.write_bytes(tomli_w.dumps(config_dict).encode())
     console.print("  [green]✓[/green] Created .sentinel/config.toml")
+
+
+_SENTINEL_DIR_GITIGNORE = """\
+# Sentinel runtime state — ephemeral, do not commit.
+state/
+
+# Durable artifacts — commit these.
+# (listed explicitly for clarity; not actually negated here because
+# git treats untracked files as not-ignored by default)
+#   config.toml
+#   backlog.md
+#   lenses.md
+#   domain_brief.md
+#   runs/
+#   proposals/
+#   scans/
+"""
+
+
+def _write_sentinel_gitignore(project: Path) -> None:
+    """Write .sentinel/.gitignore so ephemeral state/ never gets committed.
+
+    Without this, a user's first `git add .sentinel/` after auto-init
+    stages runtime state (state/) alongside durable artifacts (config,
+    lenses, backlog, runs). Shipping the gitignore at init time keeps
+    the user from having to learn which subpaths are durable.
+
+    Never overwrite — the user may have customized this file.
+    """
+    sentinel_dir = project / ".sentinel"
+    sentinel_dir.mkdir(exist_ok=True)
+    gitignore_path = sentinel_dir / ".gitignore"
+    if gitignore_path.exists():
+        return
+    gitignore_path.write_text(_SENTINEL_DIR_GITIGNORE)
+    console.print("  [green]✓[/green] Created .sentinel/.gitignore")
 
 
 def _install_claude_templates(project: Path) -> None:

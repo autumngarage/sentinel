@@ -460,6 +460,57 @@ class TestAutoGitignore:
         assert ".gitignore" in latest_files
 
 
+class TestSentinelDirGitignore:
+    """sentinel init writes .sentinel/.gitignore so runtime state (state/)
+    never gets staged when a user does `git add .sentinel/`. Durable
+    artifacts (config.toml, lenses.md, runs/, etc.) remain trackable."""
+
+    def test_auto_init_via_work_writes_sentinel_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Fresh `sentinel work --dry-run` auto-inits and must drop
+        .sentinel/.gitignore excluding the ephemeral state/ dir.
+
+        The downstream scan may fail against stub providers — we only
+        care that the auto-init step ran and wrote the gitignore.
+        """
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["work", "--dry-run"])
+
+        gitignore_path = isolated_home / ".sentinel" / ".gitignore"
+        assert gitignore_path.exists(), (
+            "auto-init must create .sentinel/.gitignore"
+        )
+        contents = gitignore_path.read_text()
+        assert "state/" in contents, (
+            f"ephemeral state/ must be ignored; got:\n{contents}"
+        )
+
+    def test_init_writes_sentinel_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Explicit `sentinel init` also writes the .sentinel/.gitignore."""
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore_path = isolated_home / ".sentinel" / ".gitignore"
+        assert gitignore_path.exists()
+        assert "state/" in gitignore_path.read_text()
+
+    def test_does_not_overwrite_user_customized_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """If .sentinel/.gitignore already exists, init must leave it
+        alone — user may have customized it."""
+        fake_cli_env(claude=True)
+        sentinel_dir = isolated_home / ".sentinel"
+        sentinel_dir.mkdir()
+        gitignore_path = sentinel_dir / ".gitignore"
+        gitignore_path.write_text("# my custom rules\nfoo/\n")
+
+        CliRunner().invoke(main, ["init", "--yes"])
+        assert gitignore_path.read_text() == "# my custom rules\nfoo/\n"
+
+
 class TestNoGoalsTemplate:
     """Sentinel reads whatever project docs exist — no dedicated goals file."""
 
