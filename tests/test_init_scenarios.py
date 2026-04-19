@@ -441,6 +441,39 @@ class TestAutoGitignore:
         # No duplicate block appended.
         assert after.count("# sentinel artifacts") == 1
 
+    def test_reinit_preserves_user_sentinel_line_below_generated_block(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration boundary: the legacy generated block had no
+        trailing blank delimiter, so a naive "until next blank" scan
+        would eat a user-authored `.sentinel/` line appended directly
+        below `.claude/`. The migration must only strip the *legacy*
+        `.sentinel/` line (the one sitting between the marker and the
+        `.claude/` line), and leave user content below untouched.
+        """
+        # New-style generated block (no stale `.sentinel/` inside), with
+        # the user's own `.sentinel/` appended immediately below — no
+        # blank line separating it from our block.
+        pre_existing = (
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".claude/\n"
+            ".sentinel/\n"  # user's own entry directly below our block
+            "node_modules/\n"
+        )
+        (isolated_home / ".gitignore").write_text(pre_existing)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after = (isolated_home / ".gitignore").read_text().splitlines()
+        # User's `.sentinel/` entry below the block is preserved.
+        assert ".sentinel/" in after
+        # `.claude/` still present.
+        assert ".claude/" in after
+        # Other user content preserved.
+        assert "node_modules/" in after
+
     def test_gitignore_change_is_committed_in_git_repo(
         self, fake_cli_env, isolated_home,
     ):

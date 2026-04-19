@@ -984,15 +984,26 @@ def _ensure_gitignore_entries(project: Path) -> None:
 
 
 def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
-    """Remove a stale ``.sentinel/`` line from within the sentinel-generated
-    block of an existing .gitignore.
+    """Remove the stale ``.sentinel/`` line from the legacy sentinel-
+    generated block of an existing .gitignore.
 
     Returns the migrated text if a change is needed, ``None`` if the
-    file is already compliant. Only strips a line whose stripped value
-    is exactly ``.sentinel/`` and that sits within the sentinel block
-    (between our marker comment and the next blank line or EOF). We
-    never touch ``.sentinel/`` entries the user may have written
-    outside the generated block.
+    file is already compliant.
+
+    The legacy generated block had exactly this shape::
+
+        # sentinel artifacts — generated per-run, not source
+        .sentinel/
+        .claude/
+
+    with no trailing blank delimiter, which means we can't use a blank
+    line as the lower bound of the block — users who appended their own
+    ``.sentinel/`` below ``.claude/`` without an intervening blank would
+    have that line eaten by a naive scan. To stay safe we only strip a
+    ``.sentinel/`` line that sits on the line directly following the
+    marker comment and is directly followed by the ``.claude/`` line.
+    That signature uniquely identifies the legacy generated block and
+    leaves every user-authored entry alone.
     """
     lines = existing.splitlines(keepends=True)
     try:
@@ -1003,23 +1014,16 @@ def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
     except StopIteration:
         return None
 
-    # Find the end of the generated block: next blank line, or EOF.
-    end_idx = len(lines)
-    for i in range(marker_idx + 1, len(lines)):
-        if lines[i].strip() == "":
-            end_idx = i
-            break
-
-    changed = False
-    new_lines: list[str] = []
-    for i, line in enumerate(lines):
-        if marker_idx <= i < end_idx and line.strip() == ".sentinel/":
-            changed = True
-            continue
-        new_lines.append(line)
-
-    if not changed:
+    stale_idx = marker_idx + 1
+    claude_idx = marker_idx + 2
+    if claude_idx >= len(lines):
         return None
+    if lines[stale_idx].strip() != ".sentinel/":
+        return None
+    if lines[claude_idx].strip() != ".claude/":
+        return None
+
+    new_lines = lines[:stale_idx] + lines[stale_idx + 1:]
     return "".join(new_lines)
 
 
