@@ -13,6 +13,13 @@ project type). Sentinel never invents a check command. If a project
 has no configured lint/test command, the verdict is `no_check_defined`
 rather than silently passing.
 
+A configured-but-not-installed tool (e.g. `swiftlint` in a Swift project
+on a machine that hasn't `brew install`-ed it) records `skipped` — not
+`fail`. A missing tool is an environment gap, not a code defect; treating
+it as `fail` would block every Swift project without swiftlint, every
+Python project without ruff, etc. from shipping any code. The skipped
+verdict carries an install hint so the operator can close the gap.
+
 What this module does NOT do:
 - It does not parse Coder's claims or commit messages. The project's
   existing checks are the contract; if they pass, the project's
@@ -50,12 +57,71 @@ DEFAULT_CHECK_TIMEOUT_S = 60
 # important "FAILED:" / "errors found:" lines stay in the persisted log.
 MAX_EVIDENCE_CHARS = 1000
 
+# Install hints for tools we see in the wild. Keyed by the bare binary
+# name (the first token of the configured command). When a check is
+# skipped because the tool isn't installed, the evidence includes this
+# hint so the operator can close the gap without spelunking docs.
+# Intentionally small — just the ones we've encountered in dogfood
+# across autumn-garage projects. Add more as they come up.
+TOOL_INSTALL_HINTS: dict[str, str] = {
+    "swiftlint": "brew install swiftlint",
+    "swiftformat": "brew install swiftformat",
+    "ruff": "pip install ruff  # or: uv tool install ruff",
+    "black": "pip install black",
+    "mypy": "pip install mypy",
+    "pytest": "pip install pytest  # or: uv add --dev pytest",
+    "clippy": "rustup component add clippy",
+    "cargo": "install Rust via rustup: https://rustup.rs",
+    "eslint": "npm install -g eslint",
+    "prettier": "npm install -g prettier",
+    "tsc": "npm install -g typescript",
+    "shellcheck": "brew install shellcheck",
+    "hadolint": "brew install hadolint",
+    "golangci-lint": "brew install golangci-lint",
+    "gofmt": "install Go: https://go.dev/dl/",
+}
+
+
+def _install_hint(command: str) -> str:
+    """Return an install hint for the tool referenced by `command`.
+
+    Splits the command on shell tokens and looks up the first meaningful
+    token in TOOL_INSTALL_HINTS. Handles `cargo clippy` (two tokens) by
+    also checking the second token. Falls back to an empty string when
+    no hint is known — caller substitutes the default message."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return ""
+    # Primary: first token (e.g. "swiftlint", "ruff")
+    head = Path(tokens[0]).name  # strip any path prefix
+    if head in TOOL_INSTALL_HINTS:
+        return TOOL_INSTALL_HINTS[head]
+    # Secondary: subcommand (e.g. "cargo clippy" → "clippy")
+    if len(tokens) > 1 and tokens[1] in TOOL_INSTALL_HINTS:
+        return TOOL_INSTALL_HINTS[tokens[1]]
+    return ""
+
+
+def _missing_tool_name(command: str) -> str:
+    """Extract the tool name to mention in skipped evidence. Uses the
+    first token of the command (stripped of any path prefix) so the
+    message reads naturally: `swiftlint not installed`, not
+    `/opt/homebrew/bin/swiftlint not installed`."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    return Path(tokens[0]).name if tokens else command
+
 
 @dataclass
 class CheckResult:
     name: str  # "lint" | "test"
     command: str | None  # None if no command available
-    verdict: str  # "pass" | "fail" | "no_check_defined"
+    verdict: str  # "pass" | "fail" | "skipped" | "no_check_defined"
     duration_s: float = 0.0
     evidence: str = ""  # short tail of stdout+stderr for postmortem
 
@@ -64,7 +130,8 @@ class CheckResult:
 class WorkItemVerification:
     work_item_id: str
     work_item_title: str
-    overall: str  # "verified" | "not_verified" | "no_check_defined"
+    # "verified" | "not_verified" | "unverified" | "no_check_defined"
+    overall: str
     checks: list[CheckResult] = field(default_factory=list)
     branch: str | None = None
     timestamp: str = ""
@@ -97,9 +164,12 @@ def run_check(
     project_path: Path,
     timeout_s: int = DEFAULT_CHECK_TIMEOUT_S,
 ) -> CheckResult:
-    """Run one check. No-command → no_check_defined; success → pass;
-    non-zero exit → fail; subprocess error / timeout → fail with
-    explanatory evidence."""
+    """Run one check. Verdicts:
+    - no_check_defined: no command configured
+    - pass: command ran and exited 0
+    - fail: command ran and exited non-zero, or timed out
+    - skipped: command's tool is not installed (FileNotFoundError)
+    """
     if not command:
         return CheckResult(
             name=name, command=None, verdict="no_check_defined",
@@ -122,15 +192,38 @@ def run_check(
             duration_s=time.perf_counter() - started,
             evidence=f"(timed out after {timeout_s}s)",
         )
-    except (OSError, FileNotFoundError) as e:
-        # Command was configured but couldn't start (binary missing,
-        # permission denied, etc.). This is a misconfiguration, NOT a
-        # "no check defined" — the project asked us to run something
-        # and we couldn't. Treat it as fail so it rolls up to
-        # not_verified and the broken config surfaces in the journal.
-        # The "no_check_defined" verdict is reserved for the case
-        # where the project never configured a command at all
-        # (handled at the top of this function).
+    except FileNotFoundError:
+        # The configured tool isn't installed on this machine. This is
+        # an environment gap, not a code defect — treat it as `skipped`
+        # so the work item can still ship on the strength of the other
+        # checks. The alternative (rolling up as `fail`) would block
+        # every Swift project without swiftlint, every Python project
+        # without ruff, etc., from shipping a single line of code.
+        # Log a visible warning so the gap doesn't hide silently.
+        tool = _missing_tool_name(command)
+        hint = _install_hint(command)
+        if hint:
+            evidence = (
+                f"{tool} not installed — skipping this check. "
+                f"Install to enable verification: {hint}"
+            )
+        else:
+            evidence = f"{tool} not installed — skipping"
+        logger.warning(
+            "verifier check %r skipped: %s not installed (hint: %s)",
+            name, tool, hint or "none known",
+        )
+        return CheckResult(
+            name=name, command=command, verdict="skipped",
+            duration_s=time.perf_counter() - started,
+            evidence=evidence,
+        )
+    except OSError as e:
+        # Command was configured but couldn't start for a non-"missing
+        # binary" reason (permission denied, exec format error, etc.).
+        # This is a misconfiguration, NOT a skipped tool — the binary
+        # exists but something about running it is wrong. Surface as
+        # fail so it rolls up to not_verified.
         return CheckResult(
             name=name, command=command, verdict="fail",
             duration_s=time.perf_counter() - started,
@@ -162,10 +255,14 @@ def verify_work_item(
     for the legacy single-tree path. Check configuration (touchstone-config
     etc.) is always read from `project_path` since it's repo-wide.
 
-    Overall verdict logic:
+    Overall verdict logic (skipped checks excluded from pass/fail math):
     - All checks have no command → no_check_defined (we couldn't tell)
-    - Any check failed → not_verified (claim contradicted by reality)
-    - Otherwise (all pass, or mix of pass + no_check_defined) → verified
+    - At least one fail → not_verified (claim contradicted by reality)
+    - At least one pass, zero fail → verified (skipped checks don't
+      poison a clean bill of health from the checks that DID run)
+    - Zero pass, zero fail, at least one skipped → unverified (every
+      configured check was skipped for missing tools; we have no
+      signal at all — don't claim verified)
     """
     checks_config = discover_checks(project_path)
     run_dir = working_directory or project_path
@@ -174,12 +271,27 @@ def verify_work_item(
         for name, command in checks_config.items()
     ]
 
-    if all(r.verdict == "no_check_defined" for r in results):
+    verdicts = [r.verdict for r in results]
+    n_pass = sum(1 for v in verdicts if v == "pass")
+    n_fail = sum(1 for v in verdicts if v == "fail")
+    n_skipped = sum(1 for v in verdicts if v == "skipped")
+
+    if all(v == "no_check_defined" for v in verdicts):
         overall = "no_check_defined"
-    elif any(r.verdict == "fail" for r in results):
+    elif n_fail > 0:
         overall = "not_verified"
-    else:
+    elif n_pass > 0:
         overall = "verified"
+    elif n_skipped > 0:
+        # All configured checks skipped (tools missing). We have no
+        # signal — don't claim verified, but don't roll up as
+        # not_verified either (nothing actually failed).
+        overall = "unverified"
+    else:
+        # Shouldn't reach here (all four bins empty implies zero
+        # results, which means discover_checks returned an empty dict),
+        # but be conservative if we do.
+        overall = "no_check_defined"
 
     return WorkItemVerification(
         work_item_id=work_item_id,
@@ -199,7 +311,12 @@ def persist_verification(
 
     Append-only, one line per verification, JSON-per-line so trend
     tooling can stream it. Each line is self-describing — never relies
-    on prior lines for context."""
+    on prior lines for context.
+
+    Writes happen regardless of outcome — pass, fail, skipped, and
+    no_check_defined all produce a line. A verifier run that didn't
+    leave a trail is indistinguishable from one that didn't happen,
+    which is exactly what the v0.3.3 cycle's V2 finding flagged."""
     sentinel_dir = project_path / ".sentinel"
     sentinel_dir.mkdir(parents=True, exist_ok=True)
     log_path = sentinel_dir / "verifications.jsonl"

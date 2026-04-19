@@ -1195,13 +1195,20 @@ def _should_ship(review_verdict: str, verification_overall: str | None) -> bool:
     - `approved` + `verified` → ship (the happy path)
     - `approved` + `no_check_defined` → ship (project has no test
       config; auto-merge still gated by branch protection in ship_pr)
+    - `approved` + `unverified` → ship (every configured check was
+      skipped because its tool isn't installed; treat as the same
+      "no independent signal" state as no_check_defined — auto-merge
+      is still gated by branch protection in ship_pr so unprotected
+      repos won't autoship anyway)
     - `approved` + `not_verified` → block (a configured check
       actually FAILED)
     - any non-approved verdict → block
     """
     return (
         review_verdict == "approved"
-        and verification_overall in ("verified", "no_check_defined")
+        and verification_overall in (
+            "verified", "no_check_defined", "unverified",
+        )
     )
 
 
@@ -1244,6 +1251,26 @@ def _build_pr_body(
             "verify the diff. The reviewer LLM still approved the "
             "change; please review carefully before merging.",
         ]
+    elif verification.overall == "unverified":
+        skipped = [c for c in verification.checks if c.verdict == "skipped"]
+        lines += [
+            "",
+            "> ⚠️ **All configured checks were skipped** because their "
+            "tools are not installed in this environment. The reviewer "
+            "LLM approved the change, but sentinel has no independent "
+            "signal on this diff. Install the missing tools to enable "
+            "verification:",
+            "",
+        ]
+        lines += [f"> - `{c.name}`: {c.evidence}" for c in skipped]
+    elif any(c.verdict == "skipped" for c in verification.checks):
+        skipped = [c for c in verification.checks if c.verdict == "skipped"]
+        lines += [
+            "",
+            "> ℹ️ Some checks were skipped due to missing tools:",
+            "",
+        ]
+        lines += [f"> - `{c.name}`: {c.evidence}" for c in skipped]
 
     lines += [
         "",
@@ -1544,13 +1571,45 @@ async def _execute_and_review(
         verifier_icon = {
             "verified": "[green]✅[/green]",
             "not_verified": "[red]❌[/red]",
+            "unverified": "[yellow]⚠[/yellow]",
             "no_check_defined": "[dim]—[/dim]",
         }.get(verification.overall, "?")
+        n_pass = sum(
+            1 for c in verification.checks if c.verdict == "pass"
+        )
+        n_fail = sum(
+            1 for c in verification.checks if c.verdict == "fail"
+        )
+        n_skipped = sum(
+            1 for c in verification.checks if c.verdict == "skipped"
+        )
+        # Count only non-skipped checks in the ratio so a missing lint
+        # tool doesn't count against the items that actually ran.
+        n_ran = n_pass + n_fail
+        if n_skipped:
+            status_detail = (
+                f"{n_pass} passed, {n_fail} failed, "
+                f"{n_skipped} skipped"
+            )
+        else:
+            status_detail = f"{n_pass}/{n_ran} checks passed"
         console.print(
             f"  Verifier: {verifier_icon} {verification.overall} "
-            f"[dim]({len([c for c in verification.checks if c.verdict == 'pass'])}"
-            f"/{len(verification.checks)} checks passed)[/dim]"
+            f"[dim]({status_detail})[/dim]"
         )
+        # Skipped checks are the user's to fix — surface install hints
+        # inline so operators don't have to grep the jsonl.
+        for c in verification.checks:
+            if c.verdict == "skipped":
+                console.print(
+                    f"    [yellow]⚠ {c.name} skipped:[/yellow] "
+                    f"[dim]{c.evidence}[/dim]"
+                )
+        if verification.overall == "unverified":
+            console.print(
+                "  [yellow]⚠ All checks skipped — no independent "
+                "signal on this diff.[/yellow]"
+            )
         console.print()
 
         # Ship gate: reviewer.approved AND verifier ∈ {verified,

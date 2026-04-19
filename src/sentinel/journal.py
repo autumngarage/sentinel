@@ -138,7 +138,8 @@ class WorkItemRecord:
     reviewer_verdict: str | None = None  # approved | changes_requested | rejected | None
     # Independent post-execute verifier verdict (project's own lint/test
     # commands re-run against the new code). One of:
-    # verified | not_verified | no_check_defined | None (not yet run).
+    # verified | not_verified | unverified | no_check_defined |
+    # None (not yet run).
     verification: str | None = None
     # GitHub PR URL when Sentinel shipped a PR for this work item.
     # Empty when no PR was opened (gates failed, ship aborted, etc.).
@@ -337,6 +338,7 @@ class Journal:
                     icon = {
                         "verified": "✅",
                         "not_verified": "❌",
+                        "unverified": "⚠",
                         "no_check_defined": "—",
                     }.get(wi.verification, "?")
                     lines.append(
