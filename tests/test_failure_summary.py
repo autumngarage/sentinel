@@ -37,9 +37,18 @@ class TestShouldShipGate:
         branch protection in ship_pr."""
         assert _should_ship("approved", "no_check_defined") is True
 
+    def test_approved_plus_unverified_ships(self) -> None:
+        """All configured checks skipped for missing tools — same
+        signal-strength as no_check_defined (we have nothing to say),
+        so treat them the same at the ship gate. Auto-merge is still
+        gated by base-branch protection in ship_pr, so unprotected
+        repos won't autoship either way. The PR body calls out the
+        missing tools explicitly so the operator can close the gap."""
+        assert _should_ship("approved", "unverified") is True
+
     def test_approved_plus_not_verified_blocks(self) -> None:
         """A configured check actually FAILED. Different from
-        no_check_defined; this stays blocked."""
+        no_check_defined / unverified; this stays blocked."""
         assert _should_ship("approved", "not_verified") is False
 
     def test_approved_plus_none_blocks(self) -> None:
@@ -48,13 +57,19 @@ class TestShouldShipGate:
         assert _should_ship("approved", None) is False
 
     def test_changes_requested_never_ships(self) -> None:
-        for v in ("verified", "no_check_defined", "not_verified", None):
+        for v in (
+            "verified", "no_check_defined", "unverified",
+            "not_verified", None,
+        ):
             assert _should_ship("changes-requested", v) is False, (
                 f"changes-requested + {v} must block"
             )
 
     def test_rejected_never_ships(self) -> None:
-        for v in ("verified", "no_check_defined", "not_verified", None):
+        for v in (
+            "verified", "no_check_defined", "unverified",
+            "not_verified", None,
+        ):
             assert _should_ship("rejected", v) is False, (
                 f"rejected + {v} must block"
             )

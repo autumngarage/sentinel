@@ -40,17 +40,48 @@ class TestRunCheck:
         result = run_check("lint", "/usr/bin/false", tmp_path)
         assert result.verdict == "fail"
 
-    def test_nonexistent_command_returns_fail(self, tmp_path: Path) -> None:
-        """A configured command that can't start (binary missing,
-        permission denied, etc.) is a misconfiguration — fail so it
-        rolls up to not_verified and the broken config surfaces.
-        no_check_defined is reserved for 'project never configured
-        a command at all' (covered separately above)."""
+    def test_nonexistent_command_returns_skipped(self, tmp_path: Path) -> None:
+        """A configured tool that isn't installed is an environment gap,
+        not a code defect — record `skipped` with an install hint so the
+        work item can still ship on the strength of other checks. Rolling
+        up as `fail` would block every Swift project without swiftlint,
+        every Python project without ruff, etc., from shipping any code
+        (the exact failure mode that triggered this fix on autumn-mail
+        2026-04-18). no_check_defined is still reserved for 'project
+        never configured a command at all' (covered above)."""
         result = run_check(
             "lint", "/no/such/command/at/all", tmp_path,
         )
-        assert result.verdict == "fail"
-        assert "not runnable" in result.evidence
+        assert result.verdict == "skipped"
+        assert "not installed" in result.evidence
+
+    def test_missing_known_tool_includes_install_hint(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Skipped evidence for known tools carries the install hint so
+        the operator can close the gap without spelunking docs. We force
+        FileNotFoundError via monkeypatch rather than relying on the
+        real tool being absent on the test host — swiftlint may or may
+        not be installed on dev machines, and the unit under test is
+        'how do we format the evidence when the tool is missing',
+        independent of the host's installed tooling."""
+        def raise_fnf(*_args, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "swiftlint")
+        monkeypatch.setattr("sentinel.verify.subprocess.run", raise_fnf)
+        result = run_check("lint", "swiftlint", tmp_path)
+        assert result.verdict == "skipped"
+        assert "swiftlint" in result.evidence
+        assert "brew install swiftlint" in result.evidence
+
+    def test_missing_unknown_tool_falls_back_to_bare_message(
+        self, tmp_path: Path,
+    ) -> None:
+        """Unknown tools still produce a useful skipped message even
+        without an install hint."""
+        result = run_check("lint", "totally-unknown-binary-xyz", tmp_path)
+        assert result.verdict == "skipped"
+        assert "totally-unknown-binary-xyz" in result.evidence
+        assert "skipping" in result.evidence
 
     def test_evidence_is_truncated(self, tmp_path: Path) -> None:
         """Long output gets clipped to MAX_EVIDENCE_CHARS — postmortem
@@ -127,25 +158,59 @@ class TestVerifyWorkItem:
         result = verify_work_item(tmp_path, "wi-4", "Half-checked")
         assert result.overall == "verified"
 
-    def test_unrunnable_check_rolls_up_to_not_verified(
+    def test_pass_plus_skipped_yields_verified(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        """A project with one passing check + one configured-but-missing
-        binary must end up not_verified, not verified. The previous
-        bug: missing binary returned no_check_defined which doesn't
-        roll up to fail, so a half-broken project read as 'verified'."""
+        """A project with one passing check + one configured-but-
+        uninstalled tool must end up `verified` — skipped checks don't
+        poison a clean bill of health from the checks that actually
+        ran. The alternative (roll up as not_verified) would block
+        every Swift project without swiftlint from shipping."""
         monkeypatch.setattr(
             "sentinel.verify.discover_checks",
             lambda _: {
                 "lint": "/usr/bin/true",  # passes
-                "test": "/no/such/command",  # configured but missing
+                "test": "/no/such/command",  # not installed → skipped
             },
         )
-        result = verify_work_item(tmp_path, "wi-x", "Half-broken")
-        assert result.overall == "not_verified", (
-            "configured-but-unrunnable command must propagate as fail, "
-            "not get masked by another passing check"
+        result = verify_work_item(tmp_path, "wi-x", "Half-skipped")
+        assert result.overall == "verified"
+        verdicts = {c.name: c.verdict for c in result.checks}
+        assert verdicts == {"lint": "pass", "test": "skipped"}
+
+    def test_pass_plus_fail_yields_not_verified(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A real failure still propagates — skipped handling must not
+        mask genuine check failures."""
+        monkeypatch.setattr(
+            "sentinel.verify.discover_checks",
+            lambda _: {
+                "lint": "/usr/bin/true",  # passes
+                "test": "/usr/bin/false",  # fails
+            },
         )
+        result = verify_work_item(tmp_path, "wi-y", "Real fail")
+        assert result.overall == "not_verified"
+
+    def test_all_skipped_yields_unverified(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Every configured check skipped for missing tools → we have
+        no signal at all. Must not claim `verified` (no positive signal)
+        and must not claim `not_verified` (nothing actually failed).
+        The `unverified` verdict captures 'tools were configured but
+        none of them ran' distinctly from both."""
+        monkeypatch.setattr(
+            "sentinel.verify.discover_checks",
+            lambda _: {
+                "lint": "/no/such/lint",
+                "test": "/no/such/test",
+            },
+        )
+        result = verify_work_item(tmp_path, "wi-z", "All skipped")
+        assert result.overall == "unverified"
+        assert all(c.verdict == "skipped" for c in result.checks)
 
     def test_records_metadata(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(
@@ -201,6 +266,36 @@ class TestPersistVerification:
             payload = json.loads(ln)
             assert "work_item_id" in payload
             assert "overall" in payload
+
+    def test_writes_on_every_outcome(self, tmp_path: Path) -> None:
+        """Regression guard for V2 of autumn-garage journal
+        2026-04-18-first-cycle-attempt-findings: today's v0.3.3 cycle
+        had two verifier failures that didn't appear in
+        verifications.jsonl. Persist must happen regardless of
+        outcome — pass, fail, skipped, no_check_defined all produce a
+        line, so the jsonl is a faithful audit log."""
+        outcomes = [
+            ("pass-item", "verified", "pass"),
+            ("fail-item", "not_verified", "fail"),
+            ("skip-item", "unverified", "skipped"),
+            ("nocheck-item", "no_check_defined", "no_check_defined"),
+        ]
+        for wi_id, overall, check_verdict in outcomes:
+            persist_verification(tmp_path, WorkItemVerification(
+                work_item_id=wi_id,
+                work_item_title=wi_id,
+                overall=overall,
+                checks=[CheckResult(
+                    name="lint", command="x", verdict=check_verdict,
+                    duration_s=0.0, evidence="test",
+                )],
+                timestamp="2026-04-18T10:00:00+00:00",
+            ))
+        log = (tmp_path / ".sentinel" / "verifications.jsonl").read_text()
+        lines = [ln for ln in log.splitlines() if ln.strip()]
+        assert len(lines) == len(outcomes)
+        parsed_ids = {json.loads(ln)["work_item_id"] for ln in lines}
+        assert parsed_ids == {wi_id for wi_id, _, _ in outcomes}
 
     def test_appends_does_not_overwrite(self, tmp_path: Path) -> None:
         v1 = WorkItemVerification(
