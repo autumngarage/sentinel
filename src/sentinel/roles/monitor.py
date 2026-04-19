@@ -427,12 +427,16 @@ CRITICAL: Every recommended action must be classified as `refine` or `expand`.
 
 **refine** (safe to execute autonomously):
 - Fixing bugs, silent failures, race conditions
-- Adding tests, improving coverage, docs
+- Adding tests to existing test files, improving coverage, fixing docs
 - Refactoring for clarity without changing behavior
 - Performance improvements to existing code paths
 - Security hardening of existing surfaces
 - Making timeouts/limits configurable without changing defaults
 - Removing dead code, unused deps, debug prints
+
+A refinement's anchor file(s) MUST already exist on HEAD — see the
+`files` field rules below. If the work centers on creating a brand-new
+file (a new test file, a new docs page), classify as `expand` instead.
 
 **expand** (requires user approval — sentinel will NOT auto-execute these):
 - Adding new features, endpoints, or user-facing capabilities
@@ -467,6 +471,18 @@ Every top_action MUST include these fields with high-signal content:
 path with a one-line reason it must be touched. Example:
   [{{"path": "src/sentinel/roles/monitor.py",
     "rationale": "owns SYNTHESIZE_SCHEMA — schema change goes here"}}]
+
+**HARD RULE for `refine` actions:** every path listed in `files` MUST already
+exist on HEAD. Refinements improve existing code; they may not cite paths
+that the planner expects the coder to create. If you need to add a brand-new
+file (a new test file, a new docs page, a new module), classify the action
+as `expand` — even a small new test file. The coder is allowed to create
+ancillary new files while servicing a refinement (e.g. spinning up a new
+test alongside an edit to existing source), but those ancillary files must
+NOT be in the `files` list of a refinement; only the existing-file edits
+that anchor the refinement go there. Cycle-4 dogfood (Finding F1) showed
+why: planner-cited paths absent from HEAD silently became net-new files,
+turning "harden existing code" diffs into "create from scratch" diffs.
 
 **acceptance_criteria** — list of testable conditions that must hold after the
 work is done. Use concrete, verifiable wording:
