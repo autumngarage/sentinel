@@ -340,15 +340,21 @@ class TestPresets:
 # ---------- Goals.md nudge (not a blocker) ----------
 
 class TestAutoGitignore:
-    """sentinel init appends .sentinel/ and .claude/ to the target's
-    .gitignore so every open-pr.sh / git status doesn't warn about
-    untracked sentinel artifacts."""
+    """sentinel init appends .claude/ to the target's .gitignore so every
+    open-pr.sh / git status doesn't warn about Claude Code's per-user
+    cache. R5.2: `.sentinel/` is NOT blanket-ignored here — the
+    per-directory `.sentinel/.gitignore` written by
+    `_write_sentinel_gitignore` handles `state/` exclusion so that
+    durable artifacts (config.toml, runs/, proposals/, scans/,
+    backlog.md, lenses.md, domain_brief.md) stay committable."""
 
     def test_creates_gitignore_when_absent(self, fake_cli_env, isolated_home):
         fake_cli_env(claude=True)
         CliRunner().invoke(main, ["init", "--yes"])
         gitignore = (isolated_home / ".gitignore").read_text()
-        assert ".sentinel/" in gitignore
+        # R5.2: `.sentinel/` must NOT be blanket-ignored at the root.
+        assert ".sentinel/" not in gitignore.splitlines()
+        # `.claude/` is Claude Code's per-user cache — project-external.
         assert ".claude/" in gitignore
 
     def test_appends_to_existing_gitignore(self, fake_cli_env, isolated_home):
@@ -358,8 +364,9 @@ class TestAutoGitignore:
         gitignore = (isolated_home / ".gitignore").read_text()
         # Existing entries preserved
         assert "node_modules/" in gitignore
-        # New sentinel entries added
-        assert ".sentinel/" in gitignore
+        # New sentinel artifacts entry added (.claude/ only — R5.2 scope).
+        assert ".claude/" in gitignore
+        assert ".sentinel/" not in gitignore.splitlines()
 
     def test_idempotent_on_reinit(self, fake_cli_env, isolated_home):
         """Running init twice must not duplicate the sentinel block."""
@@ -371,6 +378,138 @@ class TestAutoGitignore:
         assert first == second, "gitignore must not grow on re-init"
         # Marker appears exactly once
         assert second.count("# sentinel artifacts") == 1
+
+    def test_reinit_migrates_stale_sentinel_line(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 upgrade path: projects initialized with an older sentinel
+        have a stale `.sentinel/` line inside the generated block. Re-
+        running `sentinel init` must strip that line in-place so the bug
+        this PR fixes actually gets repaired on existing projects (not
+        just freshly-scaffolded ones).
+
+        The marker comment is preserved (so the block stays recognizable
+        as sentinel-managed) and unrelated user content is untouched.
+        """
+        # Simulate a .gitignore produced by an older sentinel version.
+        stale = (
+            "node_modules/\n"
+            "\n"
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".sentinel/\n"
+            ".claude/\n"
+        )
+        (isolated_home / ".gitignore").write_text(stale)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        migrated = (isolated_home / ".gitignore").read_text()
+        # Stale blanket is gone.
+        assert ".sentinel/" not in migrated.splitlines()
+        # `.claude/` still ignored (it's Claude Code's per-user cache).
+        assert ".claude/" in migrated.splitlines()
+        # Marker preserved so the block remains recognizable.
+        assert "# sentinel artifacts — generated per-run, not source" in migrated
+        # User's unrelated content preserved.
+        assert "node_modules/" in migrated.splitlines()
+
+    def test_reinit_leaves_user_sentinel_line_alone(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration must only strip `.sentinel/` from inside the
+        sentinel-generated block. A `.sentinel/` line the user wrote
+        elsewhere in their own .gitignore is their prerogative and must
+        stay put."""
+        user_owned = (
+            ".sentinel/\n"  # user's own line, outside our block
+            "node_modules/\n"
+            "\n"
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".claude/\n"
+        )
+        (isolated_home / ".gitignore").write_text(user_owned)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after = (isolated_home / ".gitignore").read_text()
+        # User's own `.sentinel/` line above our block is preserved.
+        assert after.splitlines()[0] == ".sentinel/"
+        # No duplicate block appended.
+        assert after.count("# sentinel artifacts") == 1
+
+    def test_reinit_does_not_match_user_comment_with_marker_prefix(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration must exact-match the legacy marker line, not
+        substring-match. A user's custom comment that happens to start
+        with "# sentinel artifacts" must not be treated as the legacy
+        generator's marker — otherwise we would delete their
+        `.sentinel/` entry from a block they wrote themselves.
+        """
+        user_block = (
+            "# sentinel artifacts I added myself\n"
+            ".sentinel/\n"
+            ".claude/\n"
+            "node_modules/\n"
+        )
+        (isolated_home / ".gitignore").write_text(user_block)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after_lines = (isolated_home / ".gitignore").read_text().splitlines()
+        # User's own `.sentinel/` line below their custom comment is
+        # preserved — migration did not false-positive on the prefix.
+        assert ".sentinel/" in after_lines
+        # User's custom comment preserved verbatim.
+        assert "# sentinel artifacts I added myself" in after_lines
+        # User's other content preserved.
+        assert "node_modules/" in after_lines
+        # And because the user's comment is NOT the exact managed
+        # marker line, init recognized there was no managed block and
+        # appended its own — otherwise `.claude/` would go unmanaged.
+        assert (
+            "# sentinel artifacts — generated per-run, not source"
+            in after_lines
+        )
+
+    def test_reinit_preserves_user_sentinel_line_below_generated_block(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration boundary: the legacy generated block had no
+        trailing blank delimiter, so a naive "until next blank" scan
+        would eat a user-authored `.sentinel/` line appended directly
+        below `.claude/`. The migration must only strip the *legacy*
+        `.sentinel/` line (the one sitting between the marker and the
+        `.claude/` line), and leave user content below untouched.
+        """
+        # New-style generated block (no stale `.sentinel/` inside), with
+        # the user's own `.sentinel/` appended immediately below — no
+        # blank line separating it from our block.
+        pre_existing = (
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".claude/\n"
+            ".sentinel/\n"  # user's own entry directly below our block
+            "node_modules/\n"
+        )
+        (isolated_home / ".gitignore").write_text(pre_existing)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after = (isolated_home / ".gitignore").read_text().splitlines()
+        # User's `.sentinel/` entry below the block is preserved.
+        assert ".sentinel/" in after
+        # `.claude/` still present.
+        assert ".claude/" in after
+        # Other user content preserved.
+        assert "node_modules/" in after
 
     def test_gitignore_change_is_committed_in_git_repo(
         self, fake_cli_env, isolated_home,

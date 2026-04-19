@@ -917,10 +917,27 @@ def _install_claude_templates(project: Path) -> None:
 
 
 _SENTINEL_GITIGNORE_MARKER = "# sentinel artifacts"
+# The exact full-line marker the legacy sentinel-init generator wrote.
+# `_migrate_stale_sentinel_gitignore_line` requires this exact string
+# (not just the substring) before stripping, so a user's custom comment
+# that happens to start with "# sentinel artifacts" can never be matched
+# as a migration target.
+_SENTINEL_GITIGNORE_MARKER_LINE = (
+    "# sentinel artifacts — generated per-run, not source"
+)
+# R5.2 (autumn-garage journal 2026-04-18-r5-findings-from-fresh-scaffold):
+# we deliberately do NOT blanket-ignore ``.sentinel/`` at the project root.
+# ``.sentinel/`` holds durable artifacts meant to be committed (config.toml,
+# runs/, proposals/, scans/, backlog.md, lenses.md, domain_brief.md). The
+# ephemeral subtree (``state/``) is excluded by the per-directory
+# ``.sentinel/.gitignore`` that ``_write_sentinel_gitignore`` installs
+# alongside this call. Blanket-ignoring ``.sentinel/`` at the root overrides
+# that design and silently hides every durable artifact from git.
+# ``.claude/`` stays here because it's Claude Code's per-user cache,
+# correctly project-external.
 _SENTINEL_GITIGNORE_BLOCK = """\
 
 # sentinel artifacts — generated per-run, not source
-.sentinel/
 .claude/
 """
 
@@ -929,9 +946,18 @@ def _ensure_gitignore_entries(project: Path) -> None:
     """Append sentinel artifact paths to the target project's .gitignore.
 
     Without this, every `git status` / `open-pr.sh` run warns about
-    uncommitted .sentinel/ and .claude/ files — friction that makes
-    users either ignore warnings (bad) or commit the artifacts (worse).
+    uncommitted .claude/ files — friction that makes users either
+    ignore warnings (bad) or commit the artifacts (worse).
     Idempotent: checks for our marker comment before appending.
+
+    R5.2 migration: earlier sentinel versions wrote a `.sentinel/` line
+    into the generated block, which silently hid every durable artifact
+    (config.toml, runs/, proposals/, scans/, backlog.md, lenses.md,
+    domain_brief.md). When we detect an existing generated block that
+    still contains the stale `.sentinel/` line, we remove just that
+    line — leaving the rest of the user's .gitignore untouched — so
+    re-running `sentinel init` on an already-initialized project
+    actually repairs the bug this PR was written to fix.
 
     Commits the .gitignore change if we're inside a git repo, because
     otherwise `sentinel work`'s `_reset_and_checkout` would wipe the
@@ -939,7 +965,25 @@ def _ensure_gitignore_entries(project: Path) -> None:
     """
     gitignore = project / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
-    if _SENTINEL_GITIGNORE_MARKER in existing:
+
+    # Whole-line equality on the marker line — NEVER a substring match.
+    # A user comment like "# sentinel artifacts I added myself" must not
+    # be mistaken for our generated marker (otherwise init would skip
+    # appending its own block, leaving .claude/ unmanaged).
+    has_managed_block = any(
+        line == _SENTINEL_GITIGNORE_MARKER_LINE
+        for line in existing.splitlines()
+    )
+    if has_managed_block:
+        migrated = _migrate_stale_sentinel_gitignore_line(existing)
+        if migrated is None:
+            return
+        gitignore.write_text(migrated)
+        console.print(
+            "  [green]✓[/green] Migrated .gitignore: removed stale "
+            "`.sentinel/` blanket entry (R5.2)",
+        )
+        _commit_gitignore_if_in_repo(project)
         return
 
     # Preserve the existing file's trailing newline situation; append
@@ -953,6 +997,60 @@ def _ensure_gitignore_entries(project: Path) -> None:
     )
 
     _commit_gitignore_if_in_repo(project)
+
+
+def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
+    """Remove the stale ``.sentinel/`` line from the legacy sentinel-
+    generated block of an existing .gitignore.
+
+    Returns the migrated text if a change is needed, ``None`` if the
+    file is already compliant.
+
+    The legacy generated block had exactly this shape::
+
+        # sentinel artifacts — generated per-run, not source
+        .sentinel/
+        .claude/
+
+    with no trailing blank delimiter, which means we can't use a blank
+    line as the lower bound of the block — users who appended their own
+    ``.sentinel/`` below ``.claude/`` without an intervening blank would
+    have that line eaten by a naive scan. Matching must also be exact
+    on the marker line itself (not a substring match): a user's own
+    comment that starts with "# sentinel artifacts" (e.g. "# sentinel
+    artifacts I added myself") must never be mistaken for the legacy
+    generator's marker.
+
+    So we strip ``.sentinel/`` only when the following three-line
+    signature matches exactly::
+
+        <full legacy marker line>
+        .sentinel/
+        .claude/
+
+    That signature uniquely identifies the legacy generated block and
+    leaves every user-authored entry alone.
+    """
+    lines = existing.splitlines(keepends=True)
+    try:
+        marker_idx = next(
+            i for i, line in enumerate(lines)
+            if line.rstrip("\n") == _SENTINEL_GITIGNORE_MARKER_LINE
+        )
+    except StopIteration:
+        return None
+
+    stale_idx = marker_idx + 1
+    claude_idx = marker_idx + 2
+    if claude_idx >= len(lines):
+        return None
+    if lines[stale_idx].strip() != ".sentinel/":
+        return None
+    if lines[claude_idx].strip() != ".claude/":
+        return None
+
+    new_lines = lines[:stale_idx] + lines[stale_idx + 1:]
+    return "".join(new_lines)
 
 
 def _commit_gitignore_if_in_repo(project: Path) -> None:
