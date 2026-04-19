@@ -88,6 +88,94 @@ def _format_files_for_prompt(files: list) -> str:
     return ", ".join(_file_label(f) for f in files)
 
 
+def _file_path(item: object) -> str | None:
+    """Extract just the path string from a `WorkItem.files` entry.
+
+    Mirror of ``_file_label`` for callers that only need the path
+    (e.g. grounding checks). Returns None for entries that don't
+    encode a path so the caller can skip them rather than raise on
+    malformed planner output.
+    """
+    if isinstance(item, str):
+        return item or None
+    if isinstance(item, dict):
+        path = item.get("path") or item.get("file")
+        if isinstance(path, str) and path:
+            return path
+    return None
+
+
+class RefinementGroundingError(Exception):
+    """Raised when a refinement cites files absent from HEAD.
+
+    A refinement (kind="refine") is supposed to *improve* existing
+    code. If its cited files don't exist on HEAD, the planner has
+    hallucinated state and the coder will silently net-create the
+    files — same diff, wrong category. Autumn-mail dogfood cycle 4
+    (Finding F1) hit exactly this when the planner referenced
+    ``Sources/AutumnMail/GmailClient.swift`` (only existed on a
+    deleted branch) and the coder happily created it from scratch.
+
+    Expansions (kind="expand") are intentionally allowed to create
+    files; this check is refinement-only.
+    """
+
+
+def _check_refinement_grounding(
+    work_item: WorkItem, working_directory: str,
+) -> None:
+    """Verify each refinement's cited files exist on HEAD.
+
+    Run before invoking the coder so a hallucinated planner reference
+    fails loudly with a clear message instead of being silently
+    absorbed into a category-error diff. Skips when:
+      - work_item.kind == "expand" (expansions may net-create files).
+      - work_item has no cited files (legacy / let-coder-determine).
+
+    The check uses ``git ls-files <path>`` against ``working_directory``
+    (the worktree, not the project root) because the worktree is what
+    the coder will see and modify. ``git ls-files`` exits 0 with empty
+    stdout when the path isn't tracked — that's the "missing" signal.
+
+    Raises:
+        RefinementGroundingError: any cited path is absent from HEAD.
+    """
+    if work_item.kind != "refine":
+        return
+    if not work_item.files:
+        return
+
+    paths_to_check: list[str] = []
+    for entry in work_item.files:
+        path = _file_path(entry)
+        if path is not None:
+            paths_to_check.append(path)
+    if not paths_to_check:
+        return
+
+    missing: list[str] = []
+    for path in paths_to_check:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            capture_output=True, text=True,
+            cwd=working_directory, timeout=10,
+        )
+        # ``--error-unmatch`` exits non-zero when the path is not
+        # tracked — that's our "missing on HEAD" signal. ls-files
+        # without it would silently return empty for missing paths,
+        # which is harder to distinguish from "git failed entirely".
+        if result.returncode != 0:
+            missing.append(path)
+
+    if missing:
+        raise RefinementGroundingError(
+            f"Refinement \"{work_item.title}\" cites files not present on "
+            f"HEAD: {missing}. Refinements must improve existing code. If "
+            f"the file is intentional new work, mark this as an expansion "
+            f"proposal instead.",
+        )
+
+
 def _run_git(
     args: list[str], cwd: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -509,6 +597,27 @@ class Coder:
                 ad, work_item, prompt, response, result,
             )
             return result
+
+        # Refinement grounding check — refuse to run a "harden existing
+        # code" item against files that don't exist on HEAD. Without
+        # this, the coder silently absorbs the contradiction by net-
+        # creating the files (Finding F1 from autumn-mail dogfood
+        # cycle 4: planner cited GmailClient.swift which only existed
+        # on a deleted branch, coder created it from scratch, tests
+        # passed, category was wrong). On revisions, the cited files
+        # may have been removed by the prior attempt — skip the check
+        # so the coder can address review feedback without re-tripping
+        # the guard on its own intermediate state.
+        if review_feedback is None:
+            try:
+                _check_refinement_grounding(work_item, wd)
+            except RefinementGroundingError as exc:
+                result.error = str(exc)
+                result.duration_ms = int((time.time() - start) * 1000)
+                _write_execution_transcript(
+                    ad, work_item, prompt, response, result, exception=exc,
+                )
+                return result
 
         # Snapshot dirty files BEFORE the call so we can subtract them
         # from the post-call snapshot — anything pre-existing belongs to
