@@ -186,7 +186,7 @@ brew install autumngarage/sentinel/sentinel
 
 ## Status
 
-v0.2.0. Core loop shipped (scan, plan, execute, review). Autonomous PR factory wired (worktree + ship_pr). Available via Homebrew (`autumngarage/sentinel` tap). PyPI release tracked separately.
+Core loop shipped (scan, plan, execute, review). Autonomous PR factory wired (worktree + ship_pr). Available via Homebrew (`autumngarage/sentinel` tap). PyPI release tracked separately. Version is git-tag-derived (`hatch-vcs`) — see `pyproject.toml` for the dynamic-version setup; the latest release is published in the GitHub Releases tab.
 
 ## License
 
